@@ -44,9 +44,9 @@ if(FLB_OUT_LIB)
       )
   endif()
 
-  if(FLB_IN_MEM)
+  if(FLB_IN_RANDOM)
     list(APPEND check_PROGRAMS
-      flb_test_in_mem.cpp
+      flb_test_in_random.cpp
       )
   endif()
 endif()
