@@ -23,11 +23,20 @@
 #include <fluent-bit/flb_input.h>
 #include <fluent-bit/flb_utils.h>
 
+#include <sys/stat.h>
+#include <sys/types.h>
+
 #include <msgpack.h>
 
 #define DEFAULT_BUF_SIZE      256
 #define DEFAULT_INTERVAL_SEC  1
 #define DEFAULT_INTERVAL_NSEC 0
+
+struct flb_tail_config {
+    char  *pos_path;
+    int   tail_fd;
+    ino_t inode;
+};
 
 struct flb_in_head_config {
     int       idx;
@@ -40,6 +49,7 @@ struct flb_in_head_config {
     int      interval_sec;
     int      interval_nsec;
 
+    struct flb_tail_config *tconfig;
     msgpack_packer   mp_pck;
     msgpack_sbuffer  mp_sbuf;
 };

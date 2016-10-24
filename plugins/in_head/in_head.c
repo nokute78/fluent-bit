@@ -34,7 +34,7 @@
 #include "in_head.h"
 
 /* cb_collect callback */
-static int in_head_collect(struct flb_config *config, void *in_context)
+static int head_collect(struct flb_config *config, void *in_context)
 {
     struct flb_in_head_config *head_config = in_context;
     int fd = -1;
@@ -53,7 +53,7 @@ static int in_head_collect(struct flb_config *config, void *in_context)
 
     if (head_config->buf_len < 0) {
         perror("read");
-        goto collect_fin;
+        goto head_collect_fin;
     }
 
     msgpack_pack_array(&head_config->mp_pck, 2);
@@ -70,8 +70,71 @@ static int in_head_collect(struct flb_config *config, void *in_context)
     head_config->idx++;
     flb_stats_update(in_head_plugin.stats_fd, 0, 1);
 
- collect_fin:
+ head_collect_fin:
     close(fd);
+    return ret;
+}
+
+static int tail_collect(struct flb_config *config, void *in_context)
+{
+    struct flb_in_head_config *head_config = in_context;
+    struct stat               file_stat;
+    int    fd  = -1;
+    int    ret = -1;
+
+    if ( stat(head_config->filepath, &file_stat) < 0 ){
+        perror("stat");
+        return -1;
+    }
+
+    /* open at every collect callback */
+    fd = open(head_config->filepath, O_RDONLY);
+    if (fd < 0) {
+        perror("open");
+        return -1;
+    }    
+
+    head_config->buf_len = read(fd, head_config->buf, head_config->buf_size);
+    flb_trace("%s read_len=%d buf_size=%d", __FUNCTION__,
+              head_config->buf_len, head_config->buf_size);
+
+    if (head_config->buf_len < 0) {
+        perror("read");
+        goto tail_collect_fin;
+    }
+
+    msgpack_pack_array(&head_config->mp_pck, 2);
+    msgpack_pack_uint64(&head_config->mp_pck, time(NULL));
+    msgpack_pack_map(&head_config->mp_pck, 1);
+
+    msgpack_pack_bin(&head_config->mp_pck, 4);
+    msgpack_pack_bin_body(&head_config->mp_pck, "head", 4);
+    msgpack_pack_bin(&head_config->mp_pck, head_config->buf_len);
+    msgpack_pack_bin_body(&head_config->mp_pck,
+                          head_config->buf, head_config->buf_len);
+
+    ret = 0;
+    head_config->idx++;
+    flb_stats_update(in_head_plugin.stats_fd, 0, 1);
+
+ tail_collect_fin:
+    close(fd);
+    return ret;
+
+}
+
+
+/* cb_collect callback */
+static int in_head_collect(struct flb_config *config, void *in_context)
+{
+    struct flb_in_head_config *head_config = in_context;
+    int ret = -1;
+
+    if (head_config->tconfig != NULL) {
+        ret = tail_collect(config, in_context);
+    } else {
+        ret = head_collect(config, in_context);
+    }
     return ret;
 }
 
@@ -81,6 +144,18 @@ static int in_head_config_read(struct flb_in_head_config *head_config,
 {
     char *filepath = NULL;
     char *pval = NULL;
+
+
+    /* tail mode setting */
+    head_config->tconfig = NULL;
+    pval = flb_input_get_property("tail_mode", in);
+    if (pval != NULL && strncasecmp("true",pval,strlen("true")) == 0) {
+        head_config->tconfig = flb_malloc(sizeof(struct flb_tail_config) );
+    }
+    filepath = flb_input_get_property("pos_file", in);
+    if (filepath) {
+        head_config->tconfig->pos_path = filepath;
+    }
 
     /* filepath setting */
     filepath = flb_input_get_property("file", in);
@@ -132,6 +207,14 @@ static int in_head_config_read(struct flb_in_head_config *head_config,
 
 static void delete_head_config(struct flb_in_head_config *head_config)
 {
+    if ( head_config->tconfig ) {
+        if ( head_config->tconfig->tail_fd >= 0 ) {
+            close(head_config->tconfig->tail_fd);
+            head_config->tconfig->tail_fd = -1;
+        }
+        flb_free(head_config->tconfig);
+    }
+
     if (head_config) {
         /* release buffer */
         if (head_config->buf != NULL) {
@@ -174,10 +257,25 @@ static int in_head_init(struct flb_input_instance *in,
 
     flb_input_set_context(in, head_config);
 
-    ret = flb_input_set_collector_time(in,
-                                       in_head_collect,
-                                       head_config->interval_sec,
-                                       head_config->interval_nsec, config);
+
+    if (head_config->tconfig != NULL) {
+        head_config->tconfig->tail_fd = open(head_config->filepath, O_RDONLY);
+        if ( head_config->tconfig->tail_fd < 0) {
+            perror("open");
+            return -1;
+        }
+
+        ret = flb_input_set_collector_event(in,
+                                            in_head_collect,
+                                            head_config->tconfig->tail_fd,
+                                            config);
+    } else {
+
+        ret = flb_input_set_collector_time(in,
+                                           in_head_collect,
+                                           head_config->interval_sec,
+                                           head_config->interval_nsec, config);
+    }
 
     /* Initialize msgpack buffer */
     msgpack_sbuffer_init(&head_config->mp_sbuf);
@@ -229,6 +327,7 @@ int in_head_exit(void *data, struct flb_config *config)
     struct flb_in_head_config *head_config = data;
 
     msgpack_sbuffer_destroy(&head_config->mp_sbuf);
+
 
     delete_head_config(head_config);
 
