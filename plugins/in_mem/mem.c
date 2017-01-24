@@ -40,6 +40,15 @@ struct flb_in_mem_config {
     pid_t  pid;
 };
 
+struct flb_in_mem_info {
+    uint64_t mem_total;
+    uint64_t mem_used;
+    uint64_t mem_free;
+    uint64_t swap_total;
+    uint64_t swap_used;
+    uint64_t swap_free;
+};
+
 struct flb_input_plugin in_mem_plugin;
 
 static int in_mem_collect(struct flb_input_instance *i_ins,
@@ -74,7 +83,7 @@ static char *field(char *data, char *field)
     return value;
 }
 
-static int mem_calc_old(uint64_t *total, uint64_t *available)
+static int mem_calc_old(struct flb_in_mem_info *m_info)
 {
     int ret;
     struct sysinfo info;
@@ -86,13 +95,18 @@ static int mem_calc_old(uint64_t *total, uint64_t *available)
     }
 
     /* set values in KBs */
-    *total     = info.totalram / 1024;
-    *available = info.freeram  / 1024;
+    m_info->mem_total     = info.totalram / 1024;
+    m_info->mem_free      = info.freeram  / 1024;
+    m_info->mem_used      = m_info->mem_total - m_info->mem_free;
+
+    m_info->swap_total    = info.totalswap / 1024;
+    m_info->swap_free     = info.freeswap  / 1024;
+    m_info->swap_used     = m_info->swap_total - m_info->swap_free;
 
     return 0;
 }
 
-static int mem_calc(uint64_t *total, uint64_t *available)
+static int mem_calc(struct flb_in_mem_info *m_info)
 {
     int fd;
     int bytes;
@@ -119,16 +133,36 @@ static int mem_calc(uint64_t *total, uint64_t *available)
     if (!tmp) {
         return -1;
     }
-    *total = atoll(tmp);
+    m_info->mem_total = atoll(tmp);
     flb_free(tmp);
 
     /* Available Memory */
-    tmp = field(buf, "MemAvailable");
+    tmp = field(buf, "MemFree");
     if (!tmp) {
         return -1;
     }
-    *available = atoll(tmp);
+    m_info->mem_free = atoll(tmp);
     flb_free(tmp);
+
+    m_info->mem_used      = m_info->mem_total - m_info->mem_free;
+
+    /* Total Swap */
+    tmp = field(buf, "SwapTotal");
+    if (!tmp) {
+        return -1;
+    }
+    m_info->swap_total = atoll(tmp);
+    flb_free(tmp);
+
+    /* Available Swap */
+    tmp = field(buf, "SwapFree");
+    if (!tmp) {
+        return -1;
+    }
+    m_info->swap_free = atoll(tmp);
+    flb_free(tmp);
+
+    m_info->swap_used     = m_info->swap_total - m_info->swap_free;
 
     return 0;
 }
@@ -177,11 +211,10 @@ static int in_mem_collect(struct flb_input_instance *i_ins,
 {
     int ret;
     int len;
-    int entries = 2;
-    uint64_t total;
-    uint64_t free;
+    int entries = 6;/* (total,used,free) * (memory, swap) */
     struct proc_task *task = NULL;
     struct flb_in_mem_config *ctx = in_context;
+    struct flb_in_mem_info info;
 
     if (ctx->pid) {
         task = proc_stat(ctx->pid, ctx->page_size);
@@ -192,10 +225,10 @@ static int in_mem_collect(struct flb_input_instance *i_ins,
     }
 
     if (config->kernel->n_version < FLB_KERNEL_VERSION(3, 14, 0)) {
-        ret = mem_calc_old(&total, &free);
+        ret = mem_calc_old(&info);
     }
     else {
-        ret = mem_calc(&total, &free);
+        ret = mem_calc(&info);
     }
 
     if (ret == -1) {
@@ -213,13 +246,30 @@ static int in_mem_collect(struct flb_input_instance *i_ins,
     msgpack_pack_uint64(&i_ins->mp_pck, time(NULL));
     msgpack_pack_map(&i_ins->mp_pck, entries);
 
-    msgpack_pack_bin(&i_ins->mp_pck, 5);
-    msgpack_pack_bin_body(&i_ins->mp_pck, "total", 5);
-    msgpack_pack_uint32(&i_ins->mp_pck, total);
+    msgpack_pack_bin(&i_ins->mp_pck, 9);
+    msgpack_pack_bin_body(&i_ins->mp_pck, "Mem.total", 9);
+    msgpack_pack_uint64(&i_ins->mp_pck, info.mem_total);
 
-    msgpack_pack_bin(&i_ins->mp_pck, 4);
-    msgpack_pack_bin_body(&i_ins->mp_pck, "free", 4);
-    msgpack_pack_uint32(&i_ins->mp_pck, free);
+    msgpack_pack_bin(&i_ins->mp_pck, 8);
+    msgpack_pack_bin_body(&i_ins->mp_pck, "Mem.used", 8);
+    msgpack_pack_uint64(&i_ins->mp_pck, info.mem_used);
+
+    msgpack_pack_bin(&i_ins->mp_pck, 8);
+    msgpack_pack_bin_body(&i_ins->mp_pck, "Mem.free", 8);
+    msgpack_pack_uint64(&i_ins->mp_pck, info.mem_free);
+
+    msgpack_pack_bin(&i_ins->mp_pck, 10);
+    msgpack_pack_bin_body(&i_ins->mp_pck, "Swap.total", 10);
+    msgpack_pack_uint64(&i_ins->mp_pck, info.swap_total);
+
+    msgpack_pack_bin(&i_ins->mp_pck, 9);
+    msgpack_pack_bin_body(&i_ins->mp_pck, "Swap.used", 9);
+    msgpack_pack_uint64(&i_ins->mp_pck, info.swap_used);
+
+    msgpack_pack_bin(&i_ins->mp_pck, 9);
+    msgpack_pack_bin_body(&i_ins->mp_pck, "Swap.free", 9);
+    msgpack_pack_uint64(&i_ins->mp_pck, info.swap_free);
+
 
     if (task) {
         /* RSS bytes */
@@ -237,8 +287,10 @@ static int in_mem_collect(struct flb_input_instance *i_ins,
         proc_free(task);
     }
 
-    flb_trace("[in_mem] memory total=%lu kb, available=%d kb",
-              total, free);
+    flb_trace("[in_mem] memory total=%lu kb, used=%lu kb, free=%lu kb",
+              info.mem_total, info.mem_used, info.mem_free);
+    flb_trace("[in_mem] swap total=%lu kb, used=%lu kb, free=%lu kb",
+              info.swap_total, info.swap_used, info.swap_free);
     ++ctx->idx;
 
     flb_stats_update(in_mem_plugin.stats_fd, 0, 1);
