@@ -66,7 +66,8 @@ static int configure(struct record_modifier_ctx *ctx,
             split = flb_utils_split(prop->val, ' ', 1);
             if (mk_list_size(split) != 2) {
                 flb_error("[%s] invalid record parameters",PLUGIN_NAME);
-                free(mod_record);
+                flb_free(mod_record);
+                flb_free(split);
                 continue;
             }
             /* Get first value (field) */
