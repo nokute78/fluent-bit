@@ -86,14 +86,14 @@ int msgpack2avro(avro_value_t *val, msgpack_object *o)
 #if defined(PRIu64)
         // msgpack_pack_fix_uint64
         flb_debug("got a posint: %" PRIu64 "\n", o->via.u64);
-        ret = do_avro(avro_value_set_int(val, o->via.u64), "failed on posint");
+        ret = do_avro(avro_value_set_long(val, o->via.u64), "failed on posint");
 #else
         if (o.via.u64 > ULONG_MAX)
             flb_warn("over \"%lu\"", ULONG_MAX);
-            ret = do_avro(avro_value_set_int(val, ULONG_MAX), "failed on posint");
+            ret = do_avro(avro_value_set_long(val, ULONG_MAX), "failed on posint");
         else
             flb_debug("got a posint: %lu\n", (unsigned long)o->via.u64);
-            ret = do_avro(avro_value_set_int(val, o->via.u64), "failed on posint");
+            ret = do_avro(avro_value_set_long(val, o->via.u64), "failed on posint");
 #endif
 
         break;
@@ -101,24 +101,28 @@ int msgpack2avro(avro_value_t *val, msgpack_object *o)
     case MSGPACK_OBJECT_NEGATIVE_INTEGER:
 #if defined(PRIi64)
         flb_debug("got a negint: %" PRIi64 "\n", o->via.i64);
-        ret = do_avro(avro_value_set_int(val, o->via.i64), "failed on negint");
+        ret = do_avro(avro_value_set_long(val, o->via.i64), "failed on negint");
 #else
         if (o->via.i64 > LONG_MAX)
             flb_warn("over +\"%ld\"", LONG_MAX);
-            ret = do_avro(avro_value_set_int(val, LONG_MAX), "failed on negint");
+            ret = do_avro(avro_value_set_long(val, LONG_MAX), "failed on negint");
         else if (o->via.i64 < LONG_MIN)
             flb_warn("under -\"%ld\"", LONG_MIN);
-            ret = do_avro(avro_value_set_int(val, LONG_MIN), "failed on negint");
+            ret = do_avro(avro_value_set_long(val, LONG_MIN), "failed on negint");
         else
             flb_debug("got a negint: %ld\n", (signed long)o->via.i64);
-            ret = do_avro(avro_value_set_int(val, o->via.i64), "failed on negint");
+            ret = do_avro(avro_value_set_long(val, o->via.i64), "failed on negint");
 #endif
         break;
 
     case MSGPACK_OBJECT_FLOAT32:
-    case MSGPACK_OBJECT_FLOAT64:
         flb_debug("got a float: %f\n", o->via.f64);
         ret = do_avro(avro_value_set_float(val, o->via.f64), "failed on float");
+        break;
+
+    case MSGPACK_OBJECT_FLOAT64:
+        flb_debug("got a double: %f\n", o->via.f64);
+        ret = do_avro(avro_value_set_double(val, o->via.f64), "failed on double");
         break;
 
     case MSGPACK_OBJECT_STR: 
