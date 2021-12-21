@@ -304,7 +304,7 @@ static int net_connect_sync(int fd, const struct sockaddr *addr, socklen_t addrl
         socket_errno = errno;
         err = flb_socket_error(fd);
 #endif
-
+        flb_error("socket_errno=%d err=%d", socket_errno, err);
         if (!FLB_EINPROGRESS(socket_errno) || err != 0) {
             goto exit_error;
         }
@@ -323,6 +323,8 @@ static int net_connect_sync(int fd, const struct sockaddr *addr, socklen_t addrl
         pfd_read.fd = fd;
         pfd_read.events = POLLOUT;
         ret = poll(&pfd_read, 1, connect_timeout * 1000);
+        flb_error("poll ret=%d", ret);
+        flb_socket_error(fd);
         if (ret == 0) {
             /* Timeout */
             flb_error("[net] connection #%i timeout after %i seconds to: "

@@ -38,6 +38,7 @@ int flb_socket_error(int fd)
     }
 
     if (error != 0) {
+        flb_error("getsockopt err=%d", error);
         return error;
     }
 
