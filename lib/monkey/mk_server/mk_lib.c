@@ -129,6 +129,23 @@ static inline int mk_lib_yield(mk_request_t *req)
     return 0;
 }
 
+static inline int mk_event_wait_cancel(struct mk_event_loop *loop)
+{
+    struct mk_event_ctx *ctx = loop->data;
+
+    /*   Original code:
+     *    loop->n_events = epoll_wait(ctx->efd, ctx->events, ctx->queue_size, -1);
+     *
+     * https://man7.org/linux/man-pages/man2/epoll_wait.2.html
+     * epoll_wait() returns -1 and errno is set to indicate the error.
+     * EINTR  The call was interrupted by a signal handler before either
+     *         (1) any of the requested events occurred or (2) the
+     *         timeout expired; see signal(7).
+     */
+    loop->n_events = -1; 
+    return loop->n_events;
+}
+
 static void mk_lib_worker(void *data)
 {
     int fd;
@@ -151,7 +168,7 @@ static void mk_lib_worker(void *data)
     sleep(1);
 
     /* Wait for events */
-    mk_event_wait(server->lib_evl);
+    mk_event_wait_cancel(server->lib_evl);
     mk_event_foreach(event, server->lib_evl) {
         fd = event->fd;
 
@@ -173,7 +190,7 @@ static void mk_lib_worker(void *data)
     mk_event_loop_destroy(server->lib_evl);
     mk_exit_all(server);
     pthread_kill(pthread_self(), 0);
-
+    printf("%s:canceled\n", __FUNCTION__);
     return;
 }
 
