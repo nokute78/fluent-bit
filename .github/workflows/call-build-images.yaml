@@ -135,7 +135,7 @@ jobs:
             raw,${{ matrix.suffix }}-${{ inputs.version }}
 
       - name: Build the legacy ${{ matrix.arch }} image
-        uses: docker/build-push-action@v2
+        uses: docker/build-push-action@v3
         with:
           file: ./dockerfiles/Dockerfile.${{ matrix.suffix }}
           context: .
@@ -206,7 +206,7 @@ jobs:
             raw,${{ needs.call-build-images-meta.outputs.major-version }}-debug
 
       - name: Build the legacy x86_64 debug image
-        uses: docker/build-push-action@v2
+        uses: docker/build-push-action@v3
         with:
           file: ./dockerfiles/Dockerfile.x86_64-debug
           context: .
@@ -261,7 +261,7 @@ jobs:
             raw,latest
 
       - name: Build the production images
-        uses: docker/build-push-action@v2
+        uses: docker/build-push-action@v3
         with:
           file: ./dockerfiles/Dockerfile
           context: .
@@ -284,7 +284,7 @@ jobs:
             raw,latest-debug
 
       - name: Build the debug multi-arch images
-        uses: docker/build-push-action@v2
+        uses: docker/build-push-action@v3
         with:
           file: ./dockerfiles/Dockerfile
           context: .
@@ -452,7 +452,7 @@ jobs:
           docker build -t ${{ inputs.registry }}/${{ inputs.image }}:windows-2019-${{ inputs.version }} --build-arg FLB_NIGHTLY_BUILD=${{ inputs.unstable }} --build-arg WINDOWS_VERSION=ltsc2019 -f ./dockerfiles/Dockerfile.windows .
           docker push ${{ inputs.registry }}/${{ inputs.image }}:windows-2019-${{ inputs.version }}
         # We cannot use this action as it requires privileged mode
-        # uses: docker/build-push-action@v2
+        # uses: docker/build-push-action@v3
         # with:
         #   file: ./dockerfiles/Dockerfile.windows
         #   context: .
