@@ -19,6 +19,7 @@
 
 #include <fluent-bit/flb_info.h>
 #include <fluent-bit/flb_input.h>
+#include <fluent-bit/flb_router.h>
 #include <fluent-bit/flb_filter_plugin.h>
 #include <fluent-bit/flb_metrics.h>
 #include <fluent-bit/flb_storage.h>
@@ -27,7 +28,7 @@
 #include <fluent-bit/flb_time.h>
 #include <fluent-bit/flb_record_accessor.h>
 #include <msgpack.h>
-
+#include <string.h>
 #include "rewrite_tag.h"
 
 /* Create an emitter input instance */
@@ -202,6 +203,7 @@ static int cb_rewrite_tag_init(struct flb_filter_instance *ins,
                                void *data)
 {
     int ret;
+    int len;
     flb_sds_t tmp;
     flb_sds_t emitter_name = NULL;
     struct flb_rewrite_tag *ctx;
@@ -218,6 +220,7 @@ static int cb_rewrite_tag_init(struct flb_filter_instance *ins,
     }
     ctx->ins = ins;
     ctx->config = config;
+    ctx->recursion_action = REWRITE_ACTION_NONE;
     mk_list_init(&ctx->rules);
 
     /*
@@ -250,6 +253,33 @@ static int cb_rewrite_tag_init(struct flb_filter_instance *ins,
 
         flb_filter_set_property(ins, "emitter_name", emitter_name);
         flb_sds_destroy(emitter_name);
+    }
+
+    tmp = (char *) flb_filter_get_property("recursion_action", ins);
+    if (tmp) {
+        len = strlen(tmp);
+        if (len == 4) {
+            if (strncasecmp(tmp, "none", len) == 0) {
+                ctx->recursion_action = REWRITE_ACTION_NONE;
+            }
+            else if (strncasecmp(tmp, "drop", len) == 0) {
+                ctx->recursion_action = REWRITE_ACTION_DROP;
+            }
+            else if (strncasecmp(tmp, "exit", len) == 0) {
+                ctx->recursion_action = REWRITE_ACTION_EXIT;
+            }
+            else {
+                flb_plg_warn(ctx->ins, "unknown recursion_action %s. set 'none'.", tmp);
+                ctx->recursion_action = REWRITE_ACTION_NONE;
+            }
+        }
+        else if (len == 12 && strncasecmp(tmp, "drop_and_log", len) == 0) {
+            ctx->recursion_action = REWRITE_ACTION_DROP_AND_LOG;
+        }
+        else {
+            flb_plg_warn(ctx->ins, "unknown recursion_action %s. set 'none'.", tmp);
+            ctx->recursion_action = REWRITE_ACTION_NONE;
+        }
     }
 
     /* Set config_map properties in our local context */
@@ -356,6 +386,34 @@ static int process_record(const char *tag, int tag_len, msgpack_object map,
         return FLB_FALSE;
     }
 
+    /* Check recursion */
+    if (ctx->recursion_action != REWRITE_ACTION_NONE) {
+        ret = flb_router_match(out_tag, flb_sds_len(out_tag), ctx->ins->match,
+#ifdef FLB_HAVE_REGEX
+                               ctx->ins->match_regex);
+#else
+                               NULL);
+#endif
+        if (ret) {
+            switch (ctx->recursion_action) {
+            case REWRITE_ACTION_DROP_AND_LOG:
+                flb_plg_warn(ctx->ins, "recursion occurred. tag=%s", out_tag);
+            case REWRITE_ACTION_DROP:
+                flb_sds_destroy(out_tag);
+                return FLB_TRUE;
+                break;
+            case REWRITE_ACTION_EXIT:
+                flb_sds_destroy(out_tag);
+                flb_plg_warn(ctx->ins, "recursion occurred. tag=%s", out_tag);
+                flb_plg_error(ctx->ins, "abort.");
+                flb_engine_exit_status(ctx->config, 255);
+                return FLB_FALSE;
+                break;
+            default:
+                flb_plg_error(ctx->ins, "unknown action=%d", ctx->recursion_action);
+            }
+        }
+    }
     /* Emit record with new tag */
     ret = in_emitter_add_record(out_tag, flb_sds_len(out_tag), buf, buf_size,
                                 ctx->ins_emitter);
@@ -511,6 +569,12 @@ static struct flb_config_map config_map[] = {
      FLB_FALSE, FLB_TRUE, offsetof(struct flb_rewrite_tag, emitter_mem_buf_limit),
      "set a memory buffer limit to restrict memory usage of emitter"
     },
+    {
+     FLB_CONFIG_MAP_STR, "recursion_action", "none",
+     FLB_FALSE, FLB_FALSE, 0,
+     "action when a recursion occurs. 'none', 'drop', 'drop_and_log' and 'exit' are supported."
+    },
+
     /* EOF */
     {0}
 };
