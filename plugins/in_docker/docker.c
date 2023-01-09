@@ -37,7 +37,7 @@
 static int cb_docker_collect(struct flb_input_instance *i_ins,
                              struct flb_config *config, void *in_context);
 
-static docker_info *init_docker_info(char *id)
+docker_info *in_docker_init_docker_info(char *id)
 {
     int len;
     docker_info *docker;
@@ -100,42 +100,6 @@ static char *read_line(FILE *fin)
 
     flb_free(line);
     return NULL;
-}
-
-/* This method returns list of currently running docker ids. */
-static struct mk_list *get_active_dockers()
-{
-    DIR *dp;
-    struct dirent *ep;
-    struct mk_list *list;
-
-    list = flb_malloc(sizeof(struct mk_list));
-    if (!list) {
-        flb_errno();
-        return NULL;
-    }
-    mk_list_init(list);
-
-    dp = opendir(DOCKER_CGROUP_CPU_DIR);
-    if (dp != NULL) {
-        ep = readdir(dp);
-
-        while(ep != NULL) {
-            if (ep->d_type == OS_DIR_TYPE) {
-                if (strcmp(ep->d_name, CURRENT_DIR) != 0
-                    && strcmp(ep->d_name, PREV_DIR) != 0
-                    && strlen(ep->d_name) == DOCKER_LONG_ID_LEN) { /* precautionary check */
-
-                    docker_info *docker = init_docker_info(ep->d_name);
-                    mk_list_add(&docker->_head, list);
-                }
-            }
-            ep = readdir(dp);
-        }
-        closedir(dp);
-    }
-
-    return list;
 }
 
 /* This routine returns path to docker's cgroup CPU usage file. */
@@ -557,7 +521,7 @@ static struct mk_list *get_ids_from_str(char *space_delimited_str)
          part = mk_list_entry(parts_head, struct flb_split_entry, _head);
          if (part->len == DOCKER_LONG_ID_LEN
              || part->len == DOCKER_SHORT_ID_LEN) {
-             docker = init_docker_info(part->value);
+             docker = in_docker_init_docker_info(part->value);
              mk_list_add(&docker->_head, dockers);
          }
      }
@@ -615,12 +579,12 @@ static struct mk_list *apply_filters(struct flb_docker *ctx,
     mk_list_foreach_safe(head, tmp, dockers) {
         docker = mk_list_entry(head, docker_info, _head);
         if (ctx->whitelist == NULL) {
-            new = init_docker_info(docker->id);
+            new = in_docker_init_docker_info(docker->id);
             mk_list_add(&new->_head, filtered);
         }
         else {
             if (is_exists(ctx->whitelist, docker->id)) {
-                new = init_docker_info(docker->id);
+                new = in_docker_init_docker_info(docker->id);
                 mk_list_add(&new->_head, filtered);
             }
         }
@@ -655,6 +619,7 @@ static int cb_docker_init(struct flb_input_instance *in,
         return -1;
     }
     ctx->ins = in;
+    in_docker_set_cgroup_api_v1(ctx->api); /* TODO: support cgroup v2*/
 
     init_filter_lists(in, ctx);
 
@@ -806,7 +771,7 @@ static int cb_docker_collect(struct flb_input_instance *ins,
     (void) config;
 
     /* Get current active dockers. */
-    active = get_active_dockers();
+    active = ctx->api->get_active_docker_ids();
 
     filtered = apply_filters(ctx, active);
     if (!filtered) {

@@ -64,6 +64,12 @@ typedef struct docker_snapshot {
     struct mk_list _head;
 } docker_snapshot;
 
+struct cgroup_api {
+    int cgroup_version;
+    struct mk_list* (*get_active_docker_ids) ();
+};
+int in_docker_set_cgroup_api_v1(struct cgroup_api *api);
+
 /* Docker Input configuration & context */
 struct flb_docker {
     int coll_fd;                /* collector id/fd */
@@ -71,10 +77,11 @@ struct flb_docker {
     int interval_nsec;          /* interval collection time (Nanosecond) */
     struct mk_list *whitelist;  /* dockers to monitor */
     struct mk_list *blacklist;  /* dockers to exclude */
+    struct cgroup_api *api;
     struct flb_input_instance *ins;
 };
 
 int in_docker_collect(struct flb_input_instance *i_ins,
                       struct flb_config *config, void *in_context);
-
+docker_info *in_docker_init_docker_info(char *id);
 #endif
