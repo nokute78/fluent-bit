@@ -51,7 +51,8 @@ struct flb_out_kafka *flb_out_kafka_create(struct flb_output_instance *ins,
     if (ret == -1) {
         flb_plg_error(ins, "unable to load configuration.");
         flb_free(ctx);
-        return -1;
+
+        return NULL;
     }
 
     /* rdkafka config context */
@@ -123,6 +124,9 @@ struct flb_out_kafka *flb_out_kafka_create(struct flb_output_instance *ins,
     if (ctx->timestamp_format_str) {
         if (strcasecmp(ctx->timestamp_format_str, "iso8601") == 0) {
             ctx->timestamp_format = FLB_JSON_DATE_ISO8601;
+        }
+        else if (strcasecmp(ctx->timestamp_format_str, "iso8601_ns") == 0) {
+            ctx->timestamp_format = FLB_JSON_DATE_ISO8601_NS;
         }
     }
 

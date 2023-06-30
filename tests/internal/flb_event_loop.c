@@ -20,6 +20,8 @@
 #define EVENT_LOOP_MAX_EVENTS 64
 #ifdef _WIN32
     #define TIME_EPSILON_MS 30
+#elif FLB_SYSTEM_MACOS
+    #define TIME_EPSILON_MS 200
 #else
     #define TIME_EPSILON_MS 10
 #endif
@@ -103,8 +105,8 @@ void test_timeout_create(struct mk_event_loop *loop,
 void test_timeout_destroy(struct mk_event_loop *loop, void *data)
 {
     struct mk_event *event = (struct mk_event *) data;
-    flb_pipe_close(event->fd);
     mk_event_del(loop, event);
+    flb_pipe_close(event->fd);
 }
 
 struct test_evl_context *evl_context_create()
@@ -172,7 +174,7 @@ void test_non_blocking_and_blocking_timeout()
 {   
     struct test_evl_context *ctx;
 
-    struct mk_event event;
+    struct mk_event event = {0};
 
     struct flb_time start_time;
     struct flb_time end_time;
@@ -279,7 +281,7 @@ void test_infinite_wait()
 {   
     struct test_evl_context *ctx;
 
-    struct mk_event event;
+    struct mk_event event = {0};
 
     struct flb_time start_time;
     struct flb_time end_time;
@@ -362,7 +364,7 @@ void event_loop_stress_priority_add_delete()
     struct test_evl_context *ctx;
 
     const int n_timers = EVENT_LOOP_MAX_EVENTS;
-    struct mk_event events[EVENT_LOOP_MAX_EVENTS];
+    struct mk_event events[EVENT_LOOP_MAX_EVENTS] = {0};
     struct mk_event *event_cronology[EVENT_LOOP_TEST_PRIORITIES] = {0}; /* event loop priority fifo */
     int priority_cronology = 0;
 
@@ -393,6 +395,7 @@ void event_loop_stress_priority_add_delete()
     for (i = 0; i < n_timers / 2; ++i) {
         priority = rand() % EVENT_LOOP_TEST_PRIORITIES;
         target = 0;
+        memset(&events[i], 0, sizeof(struct mk_event));
         test_timeout_create(ctx->evl, 0, 0, &events[i]);
         events[i].priority = priority;
         ++immediate_timers[priority];
@@ -465,6 +468,7 @@ void event_loop_stress_priority_add_delete()
     for (i = 0; i < n_timers / 2; ++i) {
         priority = rand() % EVENT_LOOP_TEST_PRIORITIES;
         target = 0;
+        memset(&events[i], 0, sizeof(struct mk_event));
         test_timeout_create(ctx->evl, target, 0, &events[i]);
         events[i].priority = priority;
         ++immediate_timers[priority];
@@ -476,6 +480,7 @@ void event_loop_stress_priority_add_delete()
     for (i = n_timers / 2; i < n_timers; ++i) {
         priority = rand() % EVENT_LOOP_TEST_PRIORITIES;
         target = 2; /* 2 second delay */
+        memset(&events[i], 0, sizeof(struct mk_event));
         test_timeout_create(ctx->evl, target, 0, &events[i]);
         events[i].priority = priority;
         ++delayed_timers[priority];

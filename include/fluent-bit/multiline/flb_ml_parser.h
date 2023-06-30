@@ -39,6 +39,7 @@ struct flb_ml_parser *flb_ml_parser_create(struct flb_config *ctx,
 int flb_ml_parser_destroy(struct flb_ml_parser *ml_parser);
 void flb_ml_parser_destroy_all(struct mk_list *list);
 
+struct flb_ml_parser *flb_ml_parser_get(struct flb_config *ctx, char *name);
 
 struct flb_ml_parser_ins *flb_ml_parser_instance_create(struct flb_ml *ml,
                                                         char *name);
@@ -52,6 +53,7 @@ struct flb_ml_parser *flb_ml_parser_docker(struct flb_config *config);
 struct flb_ml_parser *flb_ml_parser_cri(struct flb_config *config);
 struct flb_ml_parser *flb_ml_parser_java(struct flb_config *config, char *key);
 struct flb_ml_parser *flb_ml_parser_go(struct flb_config *config, char *key);
+struct flb_ml_parser *flb_ml_parser_ruby(struct flb_config *config, char *key);
 struct flb_ml_parser *flb_ml_parser_python(struct flb_config *config, char *key);
 
 #endif

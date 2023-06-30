@@ -311,6 +311,16 @@ static flb_sds_t get_agent_metadata(struct flb_calyptia *ctx)
     msgpack_pack_str(&mp_pck, len);
     msgpack_pack_str_body(&mp_pck, ctx->machine_id, len);
 
+    /* fleetID */
+    if (ctx->fleet_id) {
+        flb_mp_map_header_append(&mh);
+        msgpack_pack_str(&mp_pck, 7);
+        msgpack_pack_str_body(&mp_pck, "fleetID", 7);
+        len = flb_sds_len(ctx->fleet_id);
+        msgpack_pack_str(&mp_pck, len);
+        msgpack_pack_str_body(&mp_pck, ctx->fleet_id, len);
+    }
+
     /* pack environment metadata */
     pack_env_metadata(config->env, &mh, &mp_pck);
 
@@ -420,7 +430,7 @@ static flb_sds_t get_agent_info(char *buf, size_t size, char *k)
 
     len = strlen(k);
 
-    ret = flb_pack_json(buf, size, &out_buf, &out_size, &type);
+    ret = flb_pack_json(buf, size, &out_buf, &out_size, &type, NULL);
     if (ret != 0) {
         return NULL;
     }
@@ -489,7 +499,7 @@ static int store_session_set(struct flb_calyptia *ctx, char *buf, size_t size)
                              FLB_VERSION_STR "\n", sizeof(FLB_VERSION_STR) - 1);
 
     /* encode */
-    ret = flb_pack_json(buf, size, &mp_buf, &mp_size, &type);
+    ret = flb_pack_json(buf, size, &mp_buf, &mp_size, &type, NULL);
     if (ret < 0) {
         flb_plg_error(ctx->ins, "could not encode session information");
         return -1;
@@ -873,7 +883,7 @@ static void cb_calyptia_flush(struct flb_event_chunk *event_chunk,
         FLB_OUTPUT_RETURN(FLB_RETRY);
     }
 
-    if (event_chunk->type == FLB_EVENT_TYPE_METRIC) {
+    if (event_chunk->type == FLB_EVENT_TYPE_METRICS) {
         /* if we have labels append them */
         if (ctx->add_labels && mk_list_size(ctx->add_labels) > 0) {
             ret = cmt_decode_msgpack_create(&cmt,
@@ -929,7 +939,7 @@ static void cb_calyptia_flush(struct flb_event_chunk *event_chunk,
     }
     
 #ifdef FLB_HAVE_CHUNK_TRACE
-    if (event_chunk->type == (FLB_EVENT_TYPE_LOG | FLB_EVENT_TYPE_HAS_TRACE)) {
+    if (event_chunk->type == (FLB_EVENT_TYPE_LOGS | FLB_EVENT_TYPE_HAS_TRACE)) {
         json = flb_pack_msgpack_to_json_format(event_chunk->data,
                                                event_chunk->size,
                                                FLB_PACK_JSON_FORMAT_STREAM,
@@ -1046,6 +1056,11 @@ static struct flb_config_map config_map[] = {
      FLB_CONFIG_MAP_STR, "machine_id", NULL,
      0, FLB_TRUE, offsetof(struct flb_calyptia, machine_id),
      "Custom machine_id to be used when registering agent"
+    },
+    {
+     FLB_CONFIG_MAP_STR, "fleet_id", NULL,
+     0, FLB_TRUE, offsetof(struct flb_calyptia, fleet_id),
+     "Fleet ID for identifying as part of a managed fleet"
     },
 
     {

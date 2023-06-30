@@ -25,8 +25,10 @@
 #include <fluent-bit/flb_input_chunk.h>
 
 /* Event types */
-#define FLB_EVENT_TYPE_LOG       FLB_INPUT_CHUNK_TYPE_LOG
-#define FLB_EVENT_TYPE_METRIC    FLB_INPUT_CHUNK_TYPE_METRIC
+#define FLB_EVENT_TYPE_LOGS       FLB_INPUT_CHUNK_TYPE_LOGS
+#define FLB_EVENT_TYPE_METRICS    FLB_INPUT_CHUNK_TYPE_METRICS
+#define FLB_EVENT_TYPE_TRACES     FLB_INPUT_CHUNK_TYPE_TRACES
+
 #define FLB_EVENT_TYPE_HAS_TRACE FLB_INPUT_CHUNK_HAS_TRACE
 
 /*
@@ -37,7 +39,7 @@
 struct flb_event_chunk {
     int type;               /* event type */
     flb_sds_t tag;          /* tag associated */
-    const void *data;       /* event content */
+    void *data;             /* event content */
     size_t size;            /* size of event */
     size_t total_events;    /* total number of serialized events */
 };

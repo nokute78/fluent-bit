@@ -284,6 +284,11 @@ struct mk_list *flb_config_map_create(struct flb_config *config,
 
         new->type = m->type;
         new->name = flb_sds_create(m->name);
+        if (new->name == NULL) {
+            flb_free(new);
+            flb_config_map_destroy(list);
+            return NULL;
+        }
 
         /* Translate default value */
         if (m->def_value) {
@@ -461,6 +466,11 @@ int flb_config_map_properties_check(char *context_name,
         ret = is_internal_debug_property(kv->key);
         if (ret == FLB_TRUE) {
             /* Skip the config map */
+            continue;
+        }
+
+        if (strcasecmp(kv->key, "active") == 0) {
+            /* Accept 'active' property ... */
             continue;
         }
 

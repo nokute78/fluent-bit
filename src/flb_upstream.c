@@ -95,7 +95,13 @@ struct flb_config_map upstream_net[] = {
      FLB_CONFIG_MAP_INT, "net.keepalive_max_recycle", "2000",
      0, FLB_TRUE, offsetof(struct flb_net_setup, keepalive_max_recycle),
      "Set maximum number of times a keepalive connection can be used "
-     "before it is retired."
+     "before it is retried."
+    },
+
+    {
+     FLB_CONFIG_MAP_INT, "net.max_worker_connections", "0",
+     0, FLB_TRUE, offsetof(struct flb_net_setup, max_worker_connections),
+     "Set the maximum number of active TCP connections that can be used per worker thread."
     },
 
     /* EOF */
@@ -436,17 +442,21 @@ static int prepare_destroy_conn(struct flb_connection *u_conn)
     flb_trace("[upstream] destroy connection #%i to %s:%i",
               u_conn->fd, u->tcp_host, u->tcp_port);
 
-    if (flb_stream_is_async(&u->base)) {
+    if (MK_EVENT_IS_REGISTERED((&u_conn->event))) {
         mk_event_del(u_conn->evl, &u_conn->event);
     }
 
     if (u_conn->fd > 0) {
+#ifdef FLB_HAVE_TLS
+        if (u_conn->tls_session != NULL) {
+            flb_tls_session_destroy(u_conn->tls_session);
+        }
+#endif
+        shutdown(u_conn->fd, SHUT_RDWR);
         flb_socket_close(u_conn->fd);
-
         u_conn->fd = -1;
         u_conn->event.fd = -1;
     }
-
     /* remove connection from the queue */
     mk_list_del(&u_conn->_head);
 
@@ -480,12 +490,6 @@ static int destroy_conn(struct flb_connection *u_conn)
     if (u_conn->busy_flag) {
         return 0;
     }
-
-#ifdef FLB_HAVE_TLS
-    if (u_conn->tls_session != NULL) {
-        flb_tls_session_destroy(u_conn->tls_session);
-    }
-#endif
 
     mk_list_del(&u_conn->_head);
 
@@ -608,6 +612,7 @@ int flb_upstream_conn_recycle(struct flb_connection *conn, int val)
 struct flb_connection *flb_upstream_conn_get(struct flb_upstream *u)
 {
     int err;
+    int total_connections = 0;
     struct mk_list *tmp;
     struct mk_list *head;
     struct flb_connection *conn;
@@ -619,12 +624,31 @@ struct flb_connection *flb_upstream_conn_get(struct flb_upstream *u)
               "net.connect_timeout        = %i seconds\n"
               "net.source_address         = %s\n"
               "net.keepalive              = %s\n"
-              "net.keepalive_idle_timeout = %i seconds",
+              "net.keepalive_idle_timeout = %i seconds\n"
+              "net.max_worker_connections = %i",
               u->tcp_host, u->tcp_port,
               u->base.net.connect_timeout,
               u->base.net.source_address ? u->base.net.source_address: "any",
               u->base.net.keepalive ? "enabled": "disabled",
-              u->base.net.keepalive_idle_timeout);
+              u->base.net.keepalive_idle_timeout,
+              u->base.net.max_worker_connections);
+
+
+    /* If the upstream is limited by max connections, check current state */
+    if (u->base.net.max_worker_connections > 0) {
+        flb_stream_acquire_lock(&u->base, FLB_TRUE);
+
+        total_connections  = mk_list_size(&uq->av_queue);
+        total_connections += mk_list_size(&uq->busy_queue);
+
+        flb_stream_release_lock(&u->base);
+
+        if (total_connections >= u->base.net.max_worker_connections) {
+            flb_debug("[upstream] max worker connections=%i reached to: %s:%i, cannot connect",
+                      u->base.net.max_worker_connections, u->tcp_host, u->tcp_port);
+            return NULL;
+        }
+    }
 
     conn = NULL;
 
@@ -780,6 +804,7 @@ int flb_upstream_conn_timeouts(struct mk_list *list)
 {
     time_t now;
     int drop;
+    int inject;
     const char *reason;
     struct mk_list *head;
     struct mk_list *u_head;
@@ -840,16 +865,18 @@ int flb_upstream_conn_timeouts(struct mk_list *list)
                     }
                 }
 
+                inject = FLB_FALSE;
                 if (u_conn->event.status != MK_EVENT_NONE) {
+                    inject = FLB_TRUE;
+                }
+                u_conn->net_error = ETIMEDOUT;
+                prepare_destroy_conn(u_conn);
+                if (inject == FLB_TRUE) {
                     mk_event_inject(u_conn->evl,
                                     &u_conn->event,
                                     u_conn->event.mask,
                                     FLB_TRUE);
                 }
-
-                u_conn->net_error = ETIMEDOUT;
-
-                prepare_destroy_conn(u_conn);
             }
         }
 
@@ -858,10 +885,6 @@ int flb_upstream_conn_timeouts(struct mk_list *list)
             u_conn = mk_list_entry(u_head, struct flb_connection, _head);
 
             if ((now - u_conn->ts_available) >= u->base.net.keepalive_idle_timeout) {
-                if (u_conn->fd != -1) {
-                    shutdown(u_conn->fd, SHUT_RDWR);
-                }
-
                 prepare_destroy_conn(u_conn);
                 flb_debug("[upstream] drop keepalive connection #%i to %s:%i "
                           "(keepalive idle timeout)",

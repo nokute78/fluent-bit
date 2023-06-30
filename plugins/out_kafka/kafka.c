@@ -21,6 +21,7 @@
 #include <fluent-bit/flb_time.h>
 #include <fluent-bit/flb_pack.h>
 #include <fluent-bit/flb_utils.h>
+#include <fluent-bit/flb_log_event_decoder.h>
 
 #include "kafka_config.h"
 #include "kafka_topic.h"
@@ -160,18 +161,27 @@ int produce_message(struct flb_time *tm, msgpack_object *map,
                 break;
 
             case FLB_JSON_DATE_ISO8601:
+            case FLB_JSON_DATE_ISO8601_NS:
                 {
                 size_t date_len;
                 int len;
                 struct tm _tm;
-                char time_formatted[32];
+                char time_formatted[36];
+
                 /* Format the time; use microsecond precision (not nanoseconds). */
                 gmtime_r(&tm->tm.tv_sec, &_tm);
                 date_len = strftime(time_formatted, sizeof(time_formatted) - 1,
                              FLB_JSON_DATE_ISO8601_FMT, &_tm);
 
-                len = snprintf(time_formatted + date_len, sizeof(time_formatted) - 1 - date_len,
-                               ".%06" PRIu64 "Z", (uint64_t) tm->tm.tv_nsec / 1000);
+                if (ctx->timestamp_format == FLB_JSON_DATE_ISO8601) {
+                    len = snprintf(time_formatted + date_len, sizeof(time_formatted) - 1 - date_len,
+                                   ".%06" PRIu64 "Z", (uint64_t) tm->tm.tv_nsec / 1000);
+                }
+                else {
+                    /* FLB_JSON_DATE_ISO8601_NS */
+                    len = snprintf(time_formatted + date_len, sizeof(time_formatted) - 1 - date_len,
+                                   ".%09" PRIu64 "Z", (uint64_t) tm->tm.tv_nsec);
+                }
                 date_len += len;
 
                 msgpack_pack_str(&mp_pck, date_len);
@@ -458,11 +468,9 @@ static void cb_kafka_flush(struct flb_event_chunk *event_chunk,
 {
 
     int ret;
-    size_t off = 0;
     struct flb_out_kafka *ctx = out_context;
-    struct flb_time tms;
-    msgpack_object *obj;
-    msgpack_unpacked result;
+    struct flb_log_event_decoder log_decoder;
+    struct flb_log_event log_event;
 
     /*
      * If the context is blocked, means rdkafka queue is full and no more
@@ -473,25 +481,34 @@ static void cb_kafka_flush(struct flb_event_chunk *event_chunk,
         FLB_OUTPUT_RETURN(FLB_RETRY);
     }
 
-    /* Iterate the original buffer and perform adjustments */
-    msgpack_unpacked_init(&result);
-    while (msgpack_unpack_next(&result,
-                               event_chunk->data,
-                               event_chunk->size, &off) == MSGPACK_UNPACK_SUCCESS) {
-        flb_time_pop_from_msgpack(&tms, &result, &obj);
+    ret = flb_log_event_decoder_init(&log_decoder,
+                                     (char *) event_chunk->data,
+                                     event_chunk->size);
 
-        ret = produce_message(&tms, obj, ctx, config);
-        if (ret == FLB_ERROR) {
-            msgpack_unpacked_destroy(&result);
-            FLB_OUTPUT_RETURN(FLB_ERROR);
-        }
-        else if (ret == FLB_RETRY) {
-            msgpack_unpacked_destroy(&result);
-            FLB_OUTPUT_RETURN(FLB_RETRY);
+    if (ret != FLB_EVENT_DECODER_SUCCESS) {
+        flb_plg_error(ctx->ins,
+                      "Log event decoder initialization error : %d", ret);
+
+        FLB_OUTPUT_RETURN(FLB_RETRY);
+    }
+
+    /* Iterate the original buffer and perform adjustments */
+    while ((ret = flb_log_event_decoder_next(
+                    &log_decoder,
+                    &log_event)) == FLB_EVENT_DECODER_SUCCESS) {
+        ret = produce_message(&log_event.timestamp,
+                              log_event.body,
+                              ctx, config);
+
+        if (ret != FLB_OK) {
+            flb_log_event_decoder_destroy(&log_decoder);
+
+            FLB_OUTPUT_RETURN(ret);
         }
     }
 
-    msgpack_unpacked_destroy(&result);
+    flb_log_event_decoder_destroy(&log_decoder);
+
     FLB_OUTPUT_RETURN(FLB_OK);
 }
 

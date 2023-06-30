@@ -33,6 +33,7 @@
 #include <fluent-bit/flb_config.h>
 #include <fluent-bit/flb_macros.h>
 #include <fluent-bit/flb_utils.h>
+#include <fluent-bit/flb_plugin.h>
 #include <fluent-bit/flb_plugin_proxy.h>
 #include <fluent-bit/flb_http_client_debug.h>
 #include <fluent-bit/flb_output_thread.h>
@@ -174,6 +175,141 @@ void flb_output_coro_add(struct flb_output_instance *ins, struct flb_coro *coro)
 }
 
 /*
+ * Queue a task to be flushed at a later time
+ * Deletes retry context if enqueue fails
+ */
+static int flb_output_task_queue_enqueue(struct flb_task_queue *queue,
+                                         struct flb_task_retry *retry,
+                                         struct flb_task *task,
+                                         struct flb_output_instance *out_ins,
+                                         struct flb_config *config)
+{
+    struct flb_task_enqueued *queued_task;
+
+    queued_task = flb_malloc(sizeof(struct flb_task_enqueued));
+    if (!queued_task) {
+        flb_errno();
+        if (retry) {
+            flb_task_retry_destroy(retry);
+        }
+        return -1;
+    }
+    queued_task->retry = retry;
+    queued_task->out_instance = out_ins;
+    queued_task->task = task;
+    queued_task->config = config;
+
+    mk_list_add(&queued_task->_head, &queue->pending);
+    return 0;
+}
+
+/*
+ * Pop task from pending queue and flush it
+ * Will delete retry context if flush fails
+ */
+static int flb_output_task_queue_flush_one(struct flb_task_queue *queue)
+{
+    struct flb_task_enqueued *queued_task;
+    int ret;
+    int is_empty;
+
+    is_empty = mk_list_is_empty(&queue->pending) == 0;
+    if (is_empty) {
+        flb_error("Attempting to flush task from an empty in_progress queue");
+        return -1;
+    }
+
+    queued_task = mk_list_entry_first(&queue->pending, struct flb_task_enqueued, _head);
+    mk_list_del(&queued_task->_head);
+    mk_list_add(&queued_task->_head, &queue->in_progress);
+
+    /*
+     * Remove temporary user now that task is out of singleplex queue.
+     * Flush will add back the user representing queued_task->out_instance if it succeeds.
+     */
+    flb_task_users_dec(queued_task->task, FLB_FALSE);
+    ret = flb_output_task_flush(queued_task->task,
+                                queued_task->out_instance,
+                                queued_task->config);
+
+    /* Destroy retry context if needed */
+    if (ret == -1) {
+        if (queued_task->retry) {
+            flb_task_retry_destroy(queued_task->retry);
+        }
+        /* Flush the next task */
+        flb_output_task_singleplex_flush_next(queue);
+        return -1;
+    }
+
+    return ret;
+}
+
+/*
+ * Will either run or queue running a single task
+ * Deletes retry context if enqueue fails
+ */
+int flb_output_task_singleplex_enqueue(struct flb_task_queue *queue,
+                                       struct flb_task_retry *retry,
+                                       struct flb_task *task,
+                                       struct flb_output_instance *out_ins,
+                                       struct flb_config *config)
+{
+    int ret;
+    int is_empty;
+
+    /*
+     * Add temporary user to preserve task while in singleplex queue.
+     * Temporary user will be removed when task is removed from queue.
+     *
+     * Note: if we fail to increment now, then the task may be prematurely
+     * deleted if the task's users go to 0 while we are waiting in the
+     * queue.
+     */
+    flb_task_users_inc(task);
+
+    /* Enqueue task */
+    ret = flb_output_task_queue_enqueue(queue, retry, task, out_ins, config);
+    if (ret == -1) {
+        return -1;
+    }
+
+    /* Launch task if nothing is running */
+    is_empty = mk_list_is_empty(&out_ins->singleplex_queue->in_progress) == 0;
+    if (is_empty) {
+        return flb_output_task_queue_flush_one(out_ins->singleplex_queue);
+    }
+    
+    return 0;
+}
+
+/*
+ * Clear in progress task and flush a single queued task if exists
+ * Deletes retry context on next flush if flush fails
+ */
+int flb_output_task_singleplex_flush_next(struct flb_task_queue *queue)
+{
+    int is_empty;
+    struct flb_task_enqueued *ended_task;
+
+    /* Remove in progress task */
+    is_empty = mk_list_is_empty(&queue->in_progress) == 0;
+    if (!is_empty) {
+        ended_task = mk_list_entry_first(&queue->in_progress,
+                                        struct flb_task_enqueued, _head);
+        mk_list_del(&ended_task->_head);
+        flb_free(ended_task);
+    }
+    
+    /* Flush if there is a pending task queued */
+    is_empty = mk_list_is_empty(&queue->pending) == 0;
+    if (!is_empty) {
+        return flb_output_task_queue_flush_one(queue);
+    }
+    return 0;
+}
+
+/*
  * Flush a task through the output plugin, either using a worker thread + coroutine
  * or a simple co-routine in the current thread.
  */
@@ -191,6 +327,11 @@ int flb_output_task_flush(struct flb_task *task,
         ret = flb_output_thread_pool_flush(task, out_ins, config);
         if (ret == -1) {
             flb_task_users_dec(task, FLB_FALSE);
+
+            /* If we are in synchronous mode, flush one waiting task */
+            if (out_ins->flags & FLB_OUTPUT_SYNCHRONOUS) {
+                flb_output_task_singleplex_flush_next(out_ins->singleplex_queue);
+            }
         }
     }
     else {
@@ -208,6 +349,14 @@ int flb_output_task_flush(struct flb_task *task,
                         sizeof(struct flb_output_flush*));
         if (ret == -1) {
             flb_errno();
+            flb_output_flush_destroy(out_flush);
+            flb_task_users_dec(task, FLB_FALSE);
+
+            /* If we are in synchronous mode, flush one waiting task */
+            if (out_ins->flags & FLB_OUTPUT_SYNCHRONOUS) {
+                flb_output_task_singleplex_flush_next(out_ins->singleplex_queue);
+            }
+
             return -1;
         }
     }
@@ -285,7 +434,18 @@ int flb_output_instance_destroy(struct flb_output_instance *ins)
     /* release properties */
     flb_output_free_properties(ins);
 
+    /* free singleplex queue */
+    if (ins->flags & FLB_OUTPUT_SYNCHRONOUS) {
+        flb_task_queue_destroy(ins->singleplex_queue);
+    }
+
     mk_list_del(&ins->_head);
+
+    /* processor */
+    if (ins->processor) {
+        flb_processor_destroy(ins->processor);
+    }
+
     flb_free(ins);
 
     return 0;
@@ -311,12 +471,7 @@ void flb_output_exit(struct flb_config *config)
 
         /* Check a exit callback */
         if (p->cb_exit) {
-            if (!p->proxy) {
-                p->cb_exit(ins->context, config);
-            }
-            else {
-                p->cb_exit(p, ins->context);
-            }
+            p->cb_exit(ins->context, config);
         }
         flb_output_instance_destroy(ins);
     }
@@ -448,6 +603,7 @@ struct flb_output_instance *flb_output_new(struct flb_config *config,
     }
     instance->config = config;
     instance->log_level = -1;
+    instance->log_suppress_interval = -1;
     instance->test_mode = FLB_FALSE;
     instance->is_threaded = FLB_FALSE;
     instance->tp_workers = plugin->workers;
@@ -461,6 +617,9 @@ struct flb_output_instance *flb_output_new(struct flb_config *config,
     instance->p = plugin;
     instance->callback = flb_callback_create(instance->name);
     if (!instance->callback) {
+        if (instance->flags & FLB_OUTPUT_SYNCHRONOUS) {
+            flb_task_queue_destroy(instance->singleplex_queue);
+        }
         flb_free(instance);
         return NULL;
     }
@@ -474,6 +633,9 @@ struct flb_output_instance *flb_output_new(struct flb_config *config,
         ctx = flb_calloc(1, sizeof(struct flb_plugin_proxy_context));
         if (!ctx) {
             flb_errno();
+            if (instance->flags & FLB_OUTPUT_SYNCHRONOUS) {
+                flb_task_queue_destroy(instance->singleplex_queue);
+            }
             flb_free(instance);
             return NULL;
         }
@@ -527,7 +689,21 @@ struct flb_output_instance *flb_output_new(struct flb_config *config,
     if (plugin->flags & FLB_OUTPUT_NET) {
         ret = flb_net_host_set(plugin->name, &instance->host, output);
         if (ret != 0) {
+            if (instance->flags & FLB_OUTPUT_SYNCHRONOUS) {
+                flb_task_queue_destroy(instance->singleplex_queue);
+            }
             flb_free(instance);
+            return NULL;
+        }
+    }
+
+    /* Create singleplex queue if SYNCHRONOUS mode is used */
+    instance->singleplex_queue = NULL;
+    if (instance->flags & FLB_OUTPUT_SYNCHRONOUS) {
+        instance->singleplex_queue = flb_task_queue_create();
+        if (!instance->singleplex_queue) {
+            flb_free(instance);
+            flb_errno();
             return NULL;
         }
     }
@@ -540,8 +716,12 @@ struct flb_output_instance *flb_output_new(struct flb_config *config,
 
     mk_list_add(&instance->_head, &config->outputs);
 
+    /* processor instance */
+    instance->processor = flb_processor_create(config, instance->name, instance, FLB_PLUGIN_OUTPUT);
+
     /* Tests */
     instance->test_formatter.callback = plugin->test_formatter.callback;
+
 
     return instance;
 }
@@ -598,6 +778,14 @@ int flb_output_set_property(struct flb_output_instance *ins,
             return -1;
         }
         ins->log_level = ret;
+    }
+    else if (prop_key_check("log_suppress_interval", k, len) == 0 && tmp) {
+        ret = flb_utils_time_to_seconds(tmp);
+        flb_sds_destroy(tmp);
+        if (ret == -1) {
+            return -1;
+        }
+        ins->log_suppress_interval = ret;
     }
     else if (prop_key_check("host", k, len) == 0) {
         ins->host.name = tmp;
@@ -672,27 +860,16 @@ int flb_output_set_property(struct flb_output_instance *ins,
 #endif
 #ifdef FLB_HAVE_TLS
     else if (prop_key_check("tls", k, len) == 0 && tmp) {
-        if (strcasecmp(tmp, "true") == 0 || strcasecmp(tmp, "on") == 0) {
-            if ((ins->flags & FLB_IO_TLS) == 0) {
-                flb_error("[config] %s don't support TLS", ins->name);
-                flb_sds_destroy(tmp);
-                return -1;
-            }
-
-            ins->use_tls = FLB_TRUE;
-        }
-        else {
-            ins->use_tls = FLB_FALSE;
+        ins->use_tls = flb_utils_bool(tmp);
+        if (ins->use_tls == FLB_TRUE && ((ins->flags & FLB_IO_TLS) == 0)) {
+            flb_error("[config] %s does not support TLS", ins->name);
+            flb_sds_destroy(tmp);
+            return -1;
         }
         flb_sds_destroy(tmp);
     }
     else if (prop_key_check("tls.verify", k, len) == 0 && tmp) {
-        if (strcasecmp(tmp, "true") == 0 || strcasecmp(tmp, "on") == 0) {
-            ins->tls_verify = FLB_TRUE;
-        }
-        else {
-            ins->tls_verify = FLB_FALSE;
-        }
+        ins->tls_verify = flb_utils_bool(tmp);
         flb_sds_destroy(tmp);
     }
     else if (prop_key_check("tls.debug", k, len) == 0 && tmp) {
@@ -814,6 +991,74 @@ void *flb_output_get_cmt_instance(struct flb_output_instance *ins)
 }
 #endif
 
+int flb_output_net_property_check(struct flb_output_instance *ins,
+                                  struct flb_config *config)
+{
+    int ret = 0;
+
+    /* Get Upstream net_setup configmap */
+    ins->net_config_map = flb_upstream_get_config_map(config);
+    if (!ins->net_config_map) {
+        flb_output_instance_destroy(ins);
+        return -1;
+    }
+
+    /*
+     * Validate 'net.*' properties: if the plugin use the Upstream interface,
+     * it might receive some networking settings.
+     */
+    if (mk_list_size(&ins->net_properties) > 0) {
+        ret = flb_config_map_properties_check(ins->p->name,
+                                              &ins->net_properties,
+                                              ins->net_config_map);
+        if (ret == -1) {
+            if (config->program_name) {
+                flb_helper("try the command: %s -o %s -h\n",
+                           config->program_name, ins->p->name);
+            }
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+int flb_output_plugin_property_check(struct flb_output_instance *ins,
+                                     struct flb_config *config)
+{
+    int ret = 0;
+    struct mk_list *config_map;
+    struct flb_output_plugin *p = ins->p;
+
+    if (p->config_map) {
+        /*
+         * Create a dynamic version of the configmap that will be used by the specific
+         * instance in question.
+         */
+        config_map = flb_config_map_create(config, p->config_map);
+        if (!config_map) {
+            flb_error("[output] error loading config map for '%s' plugin",
+                      p->name);
+            flb_output_instance_destroy(ins);
+            return -1;
+        }
+        ins->config_map = config_map;
+
+        /* Validate incoming properties against config map */
+        ret = flb_config_map_properties_check(ins->p->name,
+                                              &ins->properties, ins->config_map);
+        if (ret == -1) {
+            if (config->program_name) {
+                flb_helper("try the command: %s -o %s -h\n",
+                           config->program_name, ins->p->name);
+            }
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
 /* Trigger the output plugins setup callbacks to prepare them. */
 int flb_output_init_all(struct flb_config *config)
 {
@@ -823,7 +1068,6 @@ int flb_output_init_all(struct flb_config *config)
 #endif
     struct mk_list *tmp;
     struct mk_list *head;
-    struct mk_list *config_map;
     struct flb_output_instance *ins;
     struct flb_output_plugin *p;
     uint64_t ts;
@@ -996,39 +1240,7 @@ int flb_output_init_all(struct flb_config *config)
          * Before to call the initialization callback, make sure that the received
          * configuration parameters are valid if the plugin is registering a config map.
          */
-        if (p->config_map) {
-            /*
-             * Create a dynamic version of the configmap that will be used by the specific
-             * instance in question.
-             */
-            config_map = flb_config_map_create(config, p->config_map);
-            if (!config_map) {
-                flb_error("[output] error loading config map for '%s' plugin",
-                          p->name);
-                flb_output_instance_destroy(ins);
-                return -1;
-            }
-            ins->config_map = config_map;
-
-            /* Validate incoming properties against config map */
-            ret = flb_config_map_properties_check(ins->p->name,
-                                                  &ins->properties, ins->config_map);
-            if (ret == -1) {
-                if (config->program_name) {
-                    flb_helper("try the command: %s -o %s -h\n",
-                               config->program_name, ins->p->name);
-                }
-                flb_output_instance_destroy(ins);
-                return -1;
-            }
-        }
-
-        /* Init network defaults */
-        flb_net_setup_init(&ins->net_setup);
-
-        /* Get Upstream net_setup configmap */
-        ins->net_config_map = flb_upstream_get_config_map(config);
-        if (!ins->net_config_map) {
+        if (flb_output_plugin_property_check(ins, config) == -1) {
             flb_output_instance_destroy(ins);
             return -1;
         }
@@ -1052,22 +1264,13 @@ int flb_output_init_all(struct flb_config *config)
             m->value.val.boolean = FLB_FALSE;
         }
 #endif
-        /*
-         * Validate 'net.*' properties: if the plugin use the Upstream interface,
-         * it might receive some networking settings.
-         */
-        if (mk_list_size(&ins->net_properties) > 0) {
-            ret = flb_config_map_properties_check(ins->p->name,
-                                                  &ins->net_properties,
-                                                  ins->net_config_map);
-            if (ret == -1) {
-                if (config->program_name) {
-                    flb_helper("try the command: %s -o %s -h\n",
-                               config->program_name, ins->p->name);
-                }
-                flb_output_instance_destroy(ins);
-                return -1;
-            }
+
+        /* Init network defaults */
+        flb_net_setup_init(&ins->net_setup);
+
+        if (flb_output_net_property_check(ins, config) == -1) {
+            flb_output_instance_destroy(ins);
+            return -1;
         }
 
         /* Initialize plugin through it 'init callback' */
@@ -1084,6 +1287,12 @@ int flb_output_init_all(struct flb_config *config)
         if (ret == -1) {
             flb_error("[output] could not start thread pool for '%s' plugin",
                       flb_output_name(ins));
+            return -1;
+        }
+
+        /* initialize processors */
+        ret = flb_processor_init(ins->processor);
+        if (ret == -1) {
             return -1;
         }
     }
@@ -1147,6 +1356,10 @@ int flb_output_upstream_set(struct flb_upstream *u, struct flb_output_instance *
     /* IPv6 */
     if (ins->host.ipv6 == FLB_TRUE) {
         flags |= FLB_IO_IPV6;
+    }
+        /* keepalive */
+    if (ins->net_setup.keepalive == FLB_TRUE) {
+        flags |= FLB_IO_TCP_KA;
     }
 
     /* Set flags */

@@ -24,7 +24,9 @@ set(src
   flb_custom.c
   flb_input.c
   flb_input_chunk.c
+  flb_input_log.c
   flb_input_metric.c
+  flb_input_trace.c
   flb_input_thread.c
   flb_filter.c
   flb_output.c
@@ -59,6 +61,7 @@ set(src
   flb_plugin.c
   flb_gzip.c
   flb_snappy.c
+  flb_compression.c
   flb_http_client.c
   flb_callback.c
   flb_strptime.c
@@ -69,6 +72,12 @@ set(src
   flb_event.c
   flb_base64.c
   flb_ring_buffer.c
+  flb_log_event_decoder.c
+  flb_log_event_encoder.c
+  flb_log_event_encoder_primitives.c
+  flb_log_event_encoder_dynamic_field.c
+  flb_processor.c
+  flb_reload.c
   )
 
 # Config format
@@ -200,9 +209,9 @@ if(FLB_JEMALLOC)
 endif()
 
 if(FLB_REGEX)
-  set(extra_libs
-    ${extra_libs}
-    "libonigmo")
+  set(FLB_DEPS
+    ${FLB_DEPSS}
+    onigmo-static)
   set(src
     ${src}
     "flb_regex.c"
@@ -347,13 +356,16 @@ endif()
 set(FLB_DEPS
   ${FLB_DEPS}
   cfl-static
+  fluent-otel-proto
+  cmetrics-static
+  ctraces-static
   mk_core
   jsmn
   msgpack-c-static
   mpack-static
   chunkio-static
   miniz
-  cmetrics-static
+
   ${FLB_PLUGINS}
   ${FLB_PROXY_PLUGINS}
   ${extra_libs}
@@ -475,7 +487,7 @@ if(FLB_BINARY)
   endif()
 
   if(FLB_REGEX)
-    target_link_libraries(fluent-bit-bin libonigmo)
+    target_link_libraries(fluent-bit-bin onigmo-static)
   endif()
 
   if(FLB_JEMALLOC)
@@ -504,13 +516,19 @@ if(FLB_BINARY)
   endif()
 
   # Detect init system, install upstart, systemd or init.d script
-  if(IS_DIRECTORY /lib/systemd/system)
+
+  # Handle issues with detection on some systems during build
+  if(NOT SYSTEMD_UNITDIR AND IS_DIRECTORY /lib/systemd/system)
+    set(SYSTEMD_UNITDIR  /lib/systemd/system)
+  endif()
+  
+  if(SYSTEMD_UNITDIR)
     set(FLB_SYSTEMD_SCRIPT "${PROJECT_SOURCE_DIR}/init/${FLB_OUT_NAME}.service")
     configure_file(
       "${PROJECT_SOURCE_DIR}/init/systemd.in"
       ${FLB_SYSTEMD_SCRIPT}
       )
-    install(FILES ${FLB_SYSTEMD_SCRIPT} COMPONENT binary DESTINATION /lib/systemd/system)
+    install(FILES ${FLB_SYSTEMD_SCRIPT} COMPONENT binary DESTINATION ${SYSTEMD_UNITDIR})
     install(DIRECTORY DESTINATION ${FLB_INSTALL_CONFDIR} COMPONENT binary)
   elseif(IS_DIRECTORY /usr/share/upstart)
     set(FLB_UPSTART_SCRIPT "${PROJECT_SOURCE_DIR}/init/${FLB_OUT_NAME}.conf")

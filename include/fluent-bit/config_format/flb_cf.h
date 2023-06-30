@@ -24,6 +24,12 @@
 #include <fluent-bit/flb_sds.h>
 #include <monkey/mk_core.h>
 
+#include <cfl/cfl.h>
+#include <cfl/cfl_sds.h>
+#include <cfl/cfl_array.h>
+#include <cfl/cfl_list.h>
+#include <cfl/cfl_variant.h>
+
 #define FLB_CF_ERROR_SERVICE_EXISTS "SERVICE definition already exists"
 #define FLB_CF_ERROR_META_CHAR      "invalid first meta character: '@' expected"
 #define FLB_CF_ERROR_KV_INVALID_KEY "invalid key content"
@@ -56,20 +62,20 @@ enum section_type {
 };
 
 struct flb_cf_group {
-    flb_sds_t name;               /* group name */
-    struct mk_list properties;    /* key value properties */
-    struct mk_list _head;         /* link to struct flb_cf_section->groups */
+    flb_sds_t name;                /* group name */
+    struct cfl_kvlist *properties; /* key value properties */
+    struct mk_list _head;          /* link to struct flb_cf_section->groups */
 };
 
 struct flb_cf_section {
     int type;
-    flb_sds_t name;               /* name (used for FLB_CF_OTHER type) */
-    struct mk_list properties;    /* key value properties              */
+    flb_sds_t name;                /* name (used for FLB_CF_OTHER type) */
+    struct cfl_kvlist *properties; /* key value properties              */
 
-    struct mk_list groups;        /* list of groups */
+    struct mk_list groups;         /* list of groups */
 
-    struct mk_list _head;         /* link to struct flb_cf->sections */
-    struct mk_list _head_section; /* link to section type, e.g: inputs, filters.. */
+    struct mk_list _head;          /* link to struct flb_cf->sections */
+    struct mk_list _head_section;  /* link to section type, e.g: inputs, filters.. */
 };
 
 struct flb_cf {
@@ -116,8 +122,12 @@ void flb_cf_destroy(struct flb_cf *cf);
 
 void flb_cf_dump(struct flb_cf *cf);
 
+struct flb_kv *flb_cf_env_property_add(struct flb_cf *cf,
+                                       char *k_buf, size_t k_len,
+                                       char *v_buf, size_t v_len);
+
 /* metas */
-struct flb_kv *flb_cf_meta_create(struct flb_cf *cf, char *meta, int len);
+struct flb_kv *flb_cf_meta_property_add(struct flb_cf *cf, char *meta, int len);
 
 #define flb_cf_foreach_meta(cf) \
 
@@ -128,6 +138,9 @@ void flb_cf_meta_destroy_all(struct flb_cf *cf);
 /* groups */
 struct flb_cf_group *flb_cf_group_create(struct flb_cf *cf, struct flb_cf_section *s,
                                          char *name, int len);
+struct flb_cf_group *flb_cf_group_get(struct flb_cf *cf, struct flb_cf_section *s, char *name);
+void flb_cf_group_print(struct flb_cf_group *g);
+
 void flb_cf_group_destroy(struct flb_cf_group *g);
 
 /* sections */
@@ -137,13 +150,21 @@ void flb_cf_section_destroy(struct flb_cf *cf, struct flb_cf_section *s);
 void flb_cf_section_destroy_all(struct flb_cf *cf);
 
 /* properties */
-struct flb_kv *flb_cf_property_add(struct flb_cf *cf,
-                                   struct mk_list *kv_list,
-                                   char *k_buf, size_t k_len,
-                                   char *v_buf, size_t v_len);
+struct cfl_variant *flb_cf_section_property_add(struct flb_cf *cf,
+                                              struct cfl_kvlist *kv_list,
+                                              char *k_buf, size_t k_len,
+                                              char *v_buf, size_t v_len);
 
+struct cfl_array *flb_cf_section_property_add_list(struct flb_cf *cf,
+                                                   struct cfl_kvlist *kv_list,
+                                                   char *k_buf, size_t k_len);
 
-char *flb_cf_section_property_get(struct flb_cf *cf, struct flb_cf_section *s,
-                                  char *key);
+struct cfl_variant *flb_cf_section_property_get(struct flb_cf *cf,
+                                      struct flb_cf_section *s,
+                                      char *key);
+
+char *flb_cf_section_property_get_string(struct flb_cf *cf,
+                                         struct flb_cf_section *s,
+                                         char *key);
 
 #endif

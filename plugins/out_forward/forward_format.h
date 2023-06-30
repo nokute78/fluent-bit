@@ -35,8 +35,14 @@ int flb_forward_format(struct flb_config *config,
                        struct flb_input_instance *ins,
                        void *ins_ctx,
                        void *flush_ctx,
+                       int event_type,
                        const char *tag, int tag_len,
                        const void *data, size_t bytes,
                        void **out_buf, size_t *out_size);
+
+int flb_forward_format_transcode(
+        struct flb_forward *ctx, int format,
+        char *input_buffer, size_t input_length,
+        char **output_buffer, size_t *output_length);
 
 #endif

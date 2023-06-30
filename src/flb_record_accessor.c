@@ -218,7 +218,7 @@ static int ra_parse_buffer(struct flb_record_accessor *ra, flb_sds_t buf)
     }
 
     /* Append remaining string */
-    if (i - 1 > end && pre < i) {
+    if ((i - 1 > end && pre < i) || i == 1 /*allow single character*/) {
         end = flb_sds_len(buf);
         rp_str = ra_parse_string(ra, buf, pre, end);
         if (rp_str) {
@@ -245,6 +245,27 @@ void flb_ra_destroy(struct flb_record_accessor *ra)
         flb_sds_destroy(ra->pattern);
     }
     flb_free(ra);
+}
+
+int flb_ra_subkey_count(struct flb_record_accessor *ra)
+{
+    struct mk_list *head;
+    struct flb_ra_parser *rp;
+    int ret = -1;
+    int tmp;
+
+    if (ra == NULL) {
+        return -1;
+    }
+    mk_list_foreach(head, &ra->list) {
+        rp = mk_list_entry(head, struct flb_ra_parser, _head);
+        tmp = flb_ra_parser_subkey_count(rp);
+        if (tmp > ret) {
+            ret = tmp;
+        }
+    }
+
+    return ret;
 }
 
 struct flb_record_accessor *flb_ra_create(char *str, int translate_env)

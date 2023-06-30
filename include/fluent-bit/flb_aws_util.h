@@ -22,6 +22,7 @@
 #ifndef FLB_AWS_UTIL_H
 
 #include <fluent-bit/flb_output.h>
+#include <fluent-bit/flb_time.h>
 
 #define FLB_AWS_UTIL_H
 
@@ -80,7 +81,6 @@ struct flb_aws_client {
     char *proxy;
     int flags;
     flb_sds_t extra_user_agent;
-    int free_user_agent;
 
     /*
      * Additional headers which will be added to all requests.
@@ -163,8 +163,9 @@ flb_sds_t flb_json_get_val(char *response, size_t response_len, char *key);
 /*
  * Parses an XML document and returns the value of the given tag
  * Param `tag` should include angle brackets; ex "<code>"
+ * And param `end` should include end brackets: "</code>"
  */
-flb_sds_t flb_xml_get_val(char *response, size_t response_len, char *tag);
+flb_sds_t flb_aws_xml_get_val(char *response, size_t response_len, char *tag, char *tag_end);
 
 /*
  * Checks if a response contains an AWS Auth error
@@ -176,6 +177,14 @@ int flb_read_file(const char *path, char **out_buf, size_t *out_size);
 //* Constructs S3 object key as per the format. */
 flb_sds_t flb_get_s3_key(const char *format, time_t time, const char *tag,
                          char *tag_delimiter, uint64_t seq_index);
+
+/*
+ * This function is an extension to strftime which can support milliseconds with %3N,
+ * support nanoseconds with %9N or %L. The return value is the length of formatted
+ * time string.
+ */
+size_t flb_aws_strftime_precision(char **out_buf, const char *time_format,
+                                  struct flb_time *tms);
 
 #endif
 #endif /* FLB_HAVE_AWS */

@@ -70,8 +70,11 @@ static int flb_wasm_load_wasm_binary(const char *wasm_path, int8_t **out_buf, ui
     return buffer != NULL;
 
 error:
+    if (buffer != NULL) {
+        BH_FREE(buffer);
+    }
 
-    return -1;
+    return FLB_FALSE;
 }
 
 struct flb_wasm *flb_wasm_instantiate(struct flb_config *config, const char *wasm_path,
@@ -101,11 +104,14 @@ struct flb_wasm *flb_wasm_instantiate(struct flb_config *config, const char *was
         flb_errno();
         return NULL;
     }
+    fw->tag_buffer = 0;
+    fw->record_buffer = 0;
 
 #if WASM_ENABLE_LIBC_WASI != 0
     wasi_dir_list = flb_malloc(sizeof(char *) * accessible_dir_list_size);
     if (!wasi_dir_list) {
         flb_errno();
+        flb_free(fw);
         return NULL;
     }
     mk_list_foreach(head, accessible_dir_list) {
@@ -191,6 +197,9 @@ error:
     if (buffer != NULL) {
         BH_FREE(buffer);
     }
+    if (fw != NULL) {
+        flb_free(fw);
+    }
 
     wasm_runtime_destroy();
 
@@ -236,6 +245,10 @@ char *flb_wasm_call_function_format_json(struct flb_wasm *fw, const char *functi
     }
     func_result = wasm_runtime_addr_app_to_native(fw->module_inst, func_args[0]);
 
+    if (func_result == NULL) {
+        return NULL;
+    }
+
     return (char *)flb_strdup(func_result);
 }
 
@@ -257,10 +270,10 @@ int flb_wasm_call_wasi_main(struct flb_wasm *fw)
 
 void flb_wasm_buffer_free(struct flb_wasm *fw)
 {
-    if (fw->tag_buffer) {
+    if (fw->tag_buffer != 0) {
         wasm_runtime_module_free(fw->module_inst, fw->tag_buffer);
     }
-    if (fw->record_buffer) {
+    if (fw->record_buffer != 0) {
         wasm_runtime_module_free(fw->module_inst, fw->record_buffer);
     }
 }

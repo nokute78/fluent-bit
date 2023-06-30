@@ -76,6 +76,9 @@ struct flb_net_setup {
 
     /* prioritize ipv4 results when trying to establish a connection*/
     int   dns_prefer_ipv4;
+
+    /* maximum number of allowed active TCP connections */
+    int max_worker_connections;
 };
 
 /* Defines a host service and it properties */
@@ -143,6 +146,7 @@ int flb_net_socket_reset(flb_sockfd_t fd);
 int flb_net_socket_tcp_nodelay(flb_sockfd_t fd);
 int flb_net_socket_blocking(flb_sockfd_t fd);
 int flb_net_socket_nonblocking(flb_sockfd_t fd);
+int flb_net_socket_rcv_buffer(flb_sockfd_t fd, int rcvbuf);
 int flb_net_socket_tcp_fastopen(flb_sockfd_t sockfd);
 
 /* Socket handling */

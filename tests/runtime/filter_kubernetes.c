@@ -2,12 +2,18 @@
 
 #define _GNU_SOURCE /* for accept4 */
 #include <fluent-bit.h>
+#include <fluent-bit/flb_time.h>
 #include <fluent-bit/flb_info.h>
 #include "flb_tests_runtime.h"
 
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#ifdef _WIN32
+    #define TIME_EPSILON_MS 30
+#else
+    #define TIME_EPSILON_MS 10
+#endif
 
 struct kube_test {
     flb_ctx_t *flb;
@@ -19,6 +25,33 @@ struct kube_test_result {
     int   type;
     int   nMatched;
 };
+
+void wait_with_timeout(uint32_t timeout_ms, struct kube_test_result *result, int nExpected)
+{
+    struct flb_time start_time;
+    struct flb_time end_time;
+    struct flb_time diff_time;
+    uint64_t elapsed_time_flb = 0;
+
+    flb_time_get(&start_time);
+
+    while (true) {
+        if (result->nMatched == nExpected) {
+            break;
+        }
+
+        flb_time_msleep(100);
+        flb_time_get(&end_time);
+        flb_time_diff(&end_time, &start_time, &diff_time);
+        elapsed_time_flb = flb_time_to_nanosec(&diff_time) / 1000000;
+
+        if (elapsed_time_flb > timeout_ms - TIME_EPSILON_MS) {
+            flb_warn("[timeout] elapsed_time: %ld", elapsed_time_flb);
+            // Reached timeout.
+            break;
+        }
+    }
+}
 
 /* Test target mode */
 #define KUBE_TAIL     0
@@ -327,6 +360,10 @@ static void kube_test(const char *target, int type, const char *suffix, int nExp
     for (ret = 0; ret < 2000 && result.nMatched == 0; ret++) {
         usleep(1000);
     }
+
+    /* Wait until matching nExpected results */
+    wait_with_timeout(5000, &result, nExpected);
+
     TEST_CHECK(result.nMatched == nExpected);
     TEST_MSG("result.nMatched: %i\nnExpected: %i", result.nMatched, nExpected);
 
@@ -899,13 +936,13 @@ static void flb_test_systemd_logs()
         sd_journal *journal;
         r = sd_journal_open(&journal, 0);
         if (r < 0) {
-            flb_error("Skip test: journal error: ", strerror(-r));
+            flb_error("Skip test: journal error: %s", strerror(-r));
             return;
         }
 
         r = sd_journal_get_fd(journal);
         if (r < 0) {
-            flb_error("Skip test: journal fd error: ", strerror(-r));
+            flb_error("Skip test: journal fd error: %s", strerror(-r));
             sd_journal_close(journal);
             return;
         }
@@ -918,28 +955,28 @@ static void flb_test_systemd_logs()
          */
         if (flb_test_systemd_send() < 0) {
 
-            flb_error("Skip test: journal send error: ", strerror(-r));
+            flb_error("Skip test: journal send error: %s", strerror(-r));
             sd_journal_close(journal);
             return;
         }
 
         r = sd_journal_previous(journal);
         if (r < 0) {
-            flb_error("Skip test: journal previous error: ", strerror(-r));
+            flb_error("Skip test: journal previous error: %s", strerror(-r));
             sd_journal_close(journal);
             return;
         }
 
         r = sd_journal_next(journal);
         if (r < 0) {
-            flb_error("Skip test: journal next error: ", strerror(-r));
+            flb_error("Skip test: journal next error: %s", strerror(-r));
             sd_journal_close(journal);
             return;
         }
 
         r = sd_journal_wait(journal, 2000);
         if (r < 0) {
-            flb_error("Skip test: journal wait error: ", strerror(-r));
+            flb_error("Skip test: journal wait error: %s", strerror(-r));
             sd_journal_close(journal);
             return;
         }

@@ -24,6 +24,10 @@
 #include <fluent-bit/flb_pack.h>
 #include <fluent-bit/flb_config_map.h>
 #include <fluent-bit/flb_metrics.h>
+#include <fluent-bit/flb_log_event_decoder.h>
+
+#include <ctraces/ctraces.h>
+#include <ctraces/ctr_decode_msgpack.h>
 
 #include <msgpack.h>
 #include "stdout.h"
@@ -124,30 +128,68 @@ static void print_metrics_text(struct flb_output_instance *ins,
 }
 #endif
 
+static void print_traces_text(struct flb_output_instance *ins,
+                              const void *data, size_t bytes)
+{
+    int ret;
+    size_t off = 0;
+    cfl_sds_t text;
+    struct ctrace *ctr = NULL;
+
+    /* get cmetrics context */
+    ret = ctr_decode_msgpack_create(&ctr, (char *) data, bytes, &off);
+    if (ret != 0) {
+        flb_plg_error(ins, "could not process traces payload (ret=%i)", ret);
+        return;
+    }
+
+    /* convert to text representation */
+    text = ctr_encode_text_create(ctr);
+
+    /* destroy cmt context */
+    ctr_destroy(ctr);
+
+    printf("%s", text);
+    fflush(stdout);
+
+    ctr_encode_text_destroy(text);
+}
+
 static void cb_stdout_flush(struct flb_event_chunk *event_chunk,
                             struct flb_output_flush *out_flush,
                             struct flb_input_instance *i_ins,
                             void *out_context,
                             struct flb_config *config)
 {
-    msgpack_unpacked result;
-    size_t off = 0, cnt = 0;
-    struct flb_stdout *ctx = out_context;
-    flb_sds_t json;
-    char *buf = NULL;
+    struct flb_log_event_decoder log_decoder;
+    struct flb_log_event         log_event;
+    int                          result;
+    flb_sds_t                    json;
+    struct flb_stdout           *ctx;
+    size_t                       cnt;
+
     (void) config;
-    struct flb_time tmp;
-    msgpack_object *p;
+
+    result = FLB_EVENT_DECODER_SUCCESS;
+    ctx = (struct flb_stdout *) out_context;
+    cnt = 0;
 
 #ifdef FLB_HAVE_METRICS
     /* Check if the event type is metrics, handle the payload differently */
-    if (event_chunk->type == FLB_EVENT_TYPE_METRIC) {
+    if (event_chunk->type == FLB_EVENT_TYPE_METRICS) {
         print_metrics_text(ctx->ins, (char *)
                            event_chunk->data,
                            event_chunk->size);
         FLB_OUTPUT_RETURN(FLB_OK);
     }
 #endif
+
+    if (event_chunk->type == FLB_EVENT_TYPE_TRACES) {
+        print_traces_text(ctx->ins, (char *)
+                          event_chunk->data,
+                          event_chunk->size);
+        FLB_OUTPUT_RETURN(FLB_OK);
+    }
 
     /* Assuming data is a log entry...*/
     if (ctx->out_format != FLB_PACK_JSON_FORMAT_NONE) {
@@ -169,21 +211,47 @@ static void cb_stdout_flush(struct flb_event_chunk *event_chunk,
         fflush(stdout);
     }
     else {
-        msgpack_unpacked_init(&result);
-        while (msgpack_unpack_next(&result,
-                                   event_chunk->data,
-                                   event_chunk->size, &off) == MSGPACK_UNPACK_SUCCESS) {
-            if (flb_time_pop_from_msgpack(&tmp, &result, &p) != -1 ) {
-                printf("[%zd] %s: [", cnt++, event_chunk->tag);
-                printf("%"PRIu32".%09lu, ", (uint32_t)tmp.tm.tv_sec, tmp.tm.tv_nsec);
-                msgpack_object_print(stdout, *p);
-                printf("]\n");
-            }
+        result = flb_log_event_decoder_init(&log_decoder,
+                                            (char *) event_chunk->data,
+                                            event_chunk->size);
+
+        if (result != FLB_EVENT_DECODER_SUCCESS) {
+            flb_plg_error(ctx->ins,
+                          "Log event decoder initialization error : %d", result);
+
+            FLB_OUTPUT_RETURN(FLB_RETRY);
         }
-        msgpack_unpacked_destroy(&result);
-        flb_free(buf);
+
+        while ((result = flb_log_event_decoder_next(
+                            &log_decoder,
+                            &log_event)) == FLB_EVENT_DECODER_SUCCESS) {
+            printf("[%zd] %s: [[", cnt++, event_chunk->tag);
+
+            printf("%"PRIu32".%09lu, ",
+                   (uint32_t)log_event.timestamp.tm.tv_sec,
+                   log_event.timestamp.tm.tv_nsec);
+
+            msgpack_object_print(stdout, *log_event.metadata);
+
+            printf("], ");
+
+            msgpack_object_print(stdout, *log_event.body);
+
+            printf("]\n");
+        }
+
+        if (result != FLB_EVENT_DECODER_ERROR_INSUFFICIENT_DATA) {
+            flb_plg_error(ctx->ins, "decoder error : %d", result);
+        }
+
+        flb_log_event_decoder_destroy(&log_decoder);
     }
+
     fflush(stdout);
+
+    if (result != FLB_EVENT_DECODER_SUCCESS) {
+        FLB_OUTPUT_RETURN(FLB_ERROR);
+    }
 
     FLB_OUTPUT_RETURN(FLB_OK);
 }
@@ -231,6 +299,6 @@ struct flb_output_plugin out_stdout_plugin = {
     .cb_exit      = cb_stdout_exit,
     .flags        = 0,
     .workers      = 1,
-    .event_type   = FLB_OUTPUT_LOGS | FLB_OUTPUT_METRICS,
+    .event_type   = FLB_OUTPUT_LOGS | FLB_OUTPUT_METRICS | FLB_OUTPUT_TRACES,
     .config_map   = config_map
 };

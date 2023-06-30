@@ -86,6 +86,9 @@ static int in_tail_collect_pending(struct flb_input_instance *ins,
             file->size = st.st_size;
             file->pending_bytes = (file->size - file->offset);
         }
+        else {
+            memset(&st, 0, sizeof(struct stat));
+        }
 
         if (file->pending_bytes <= 0) {
             continue;
@@ -569,6 +572,14 @@ static struct flb_config_map config_map[] = {
     {
      FLB_CONFIG_MAP_TIME, "watcher_interval", "2s",
      0, FLB_TRUE, offsetof(struct flb_tail_config, watcher_interval),
+    },
+    {
+     FLB_CONFIG_MAP_TIME, "progress_check_interval", "2s",
+     0, FLB_TRUE, offsetof(struct flb_tail_config, progress_check_interval),
+    },
+    {
+     FLB_CONFIG_MAP_INT, "progress_check_interval_nsec", "0",
+     0, FLB_TRUE, offsetof(struct flb_tail_config, progress_check_interval_nsec),
     },
     {
      FLB_CONFIG_MAP_TIME, "rotate_wait", FLB_TAIL_ROTATE_WAIT,
