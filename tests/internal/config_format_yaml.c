@@ -12,6 +12,7 @@
 
 #define FLB_000 FLB_TESTS_DATA_PATH "/data/config_format/yaml/fluent-bit.yaml"
 #define FLB_001 FLB_TESTS_DATA_PATH "/data/config_format/yaml/issue_7559.yaml"
+#define FLB_002 FLB_TESTS_DATA_PATH "/data/config_format/yaml/issue_5446.yaml"
 
 /* data/config_format/fluent-bit.yaml */
 void test_basic()
@@ -87,8 +88,24 @@ void test_customs_section()
     flb_cf_destroy(cf);
 }
 
+
+/* https://github.com/fluent/fluent-bit/issues/5446 */
+void test_list_properties()
+{
+    struct flb_cf *cf;
+
+    cf = flb_cf_yaml_create(NULL, FLB_002, NULL, 0);
+    TEST_CHECK(cf != NULL);
+    if (!cf) {
+        exit(EXIT_FAILURE);
+    }
+    flb_cf_dump(cf);
+    flb_cf_destroy(cf);
+}
+
 TEST_LIST = {
     { "basic"    , test_basic},
     { "customs section", test_customs_section},
+    { "list properties", test_list_properties},
     { 0 }
 };

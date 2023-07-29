@@ -1,0 +1,20 @@
+pipeline:
+    inputs:
+        - dummy:
+              dummy: '{"remote_addr": "127.0.0.1", "message": "FOOBAR"}'
+              tag: remote
+        - dummy:
+              dummy: '{"remote_addr": "7.7.7.7", "message": "MALICIOUS"}'
+              tag: remote
+    filters:
+        - checklist:
+              name: checklist
+              match: remote
+              file: ip_list.txt
+              lookup_key: $remote_addr
+              record:
+                  - malicious true
+                  - tagged true
+    outputs:
+        - stdout:
+              match: remote

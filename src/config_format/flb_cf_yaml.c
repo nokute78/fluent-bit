@@ -120,6 +120,9 @@ struct parser_state {
     flb_sds_t key;
     flb_sds_t val;
 
+    /* temporary sequence key */
+    flb_sds_t seq_key;
+
     /* active section */
     struct flb_cf_section *cf_section;
     struct cfl_array *values; /* pointer to current values in a list. */
@@ -518,6 +521,10 @@ static int consume_event(struct flb_cf *cf, struct local_ctx *ctx,
     char *value;
     struct flb_kv *kv;
     char *last_included = get_last_included_file(ctx);
+
+    /* for Debug
+    flb_error("state=%s type=%s",state_str(s->state), event_type_str(event));
+    */
 
     switch (s->state) {
     case STATE_START:
@@ -1275,20 +1282,49 @@ static int consume_event(struct flb_cf *cf, struct local_ctx *ctx,
     case STATE_GROUP_VAL:
         switch(event->type) {
         case YAML_SCALAR_EVENT:
-            s->state = STATE_GROUP_KEY;
             value = (char *) event->data.scalar.value;
             s->val = flb_sds_create(value);
 
             /* add the kv pair to the active group properties */
-            flb_cf_section_property_add(cf, s->cf_group->properties,
-                                        s->key, flb_sds_len(s->key),
-                                        s->val, flb_sds_len(s->val));
-            flb_sds_destroy(s->key);
-            flb_sds_destroy(s->val);
-            s->key = NULL;
-            s->val = NULL;
+            if (s->seq_key) {
+                s->state = STATE_GROUP_VAL;
+                flb_cf_section_property_add(cf, s->cf_group->properties,
+                                            s->seq_key, flb_sds_len(s->seq_key),
+                                            s->val, flb_sds_len(s->val));
+            }
+            else {
+                s->state = STATE_GROUP_KEY;
+                flb_cf_section_property_add(cf, s->cf_group->properties,
+                                            s->key, flb_sds_len(s->key),
+                                            s->val, flb_sds_len(s->val));
+                flb_sds_destroy(s->key);
+                s->key = NULL;
+            }
 
+            flb_sds_destroy(s->val);
+            s->val = NULL;
             break;
+        case YAML_SEQUENCE_START_EVENT:
+            s->state = STATE_GROUP_VAL;
+            if (s->seq_key) {
+                /* FIXME: nested sequence ? */
+                flb_sds_destroy(s->seq_key);
+            }
+            s->seq_key = flb_sds_create(s->key);
+            flb_sds_destroy(s->key);
+            s->key = NULL;
+            break;
+        case YAML_SEQUENCE_END_EVENT:
+            if (s->seq_key == NULL) {
+                yaml_error_event(ctx, s, event);
+                return YAML_FAILURE;
+            }
+
+            s->state = STATE_GROUP_KEY;
+            flb_sds_destroy(s->seq_key);
+            s->seq_key = NULL;
+            break;
+
         default:
             yaml_error_event(ctx, s, event);
             return YAML_FAILURE;
