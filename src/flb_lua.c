@@ -53,12 +53,37 @@ int flb_lua_is_valid_func(lua_State *lua, flb_sds_t func)
     return ret;
 }
 
+static int flb_lua_setmetatable(lua_State *l, struct flb_lua_metadata *meta)
+{
+    if (l == NULL || meta == NULL || meta->initialized != FLB_TRUE) {
+        return -1;
+    }
+    lua_createtable(l, 0, 1);
+
+    /* data type */
+    lua_pushlstring(l, "type", 4);
+    lua_pushinteger(l, meta->data_type);
+    lua_settable(l, -3); /* point created table */
+
+    /* index: data
+     *    -1: metatable
+     *    -2: the value to set metatable
+     */
+    lua_setmetatable(l, -2);
+
+    return 0;
+}
+
 int flb_lua_pushmpack(lua_State *l, mpack_reader_t *reader)
 {
     int ret = 0;
     mpack_tag_t tag;
     uint32_t length;
     uint32_t i;
+    struct flb_lua_metadata meta;
+
+    flb_lua_metadata_init(&meta);
+    meta.data_type = mpack_tag_type(&tag);
 
     tag = mpack_read_tag(reader);
     switch (mpack_tag_type(&tag)) {
@@ -88,6 +113,9 @@ int flb_lua_pushmpack(lua_State *l, mpack_reader_t *reader)
             reader->data += length;
             break;
         case mpack_type_array:
+            flb_lua_metadata_init(&meta);
+            meta.data_type = mpack_tag_type(&tag);
+
             length = mpack_tag_array_count(&tag);
             lua_createtable(l, length, 0);
             for (i = 0; i < length; i++) {
@@ -97,8 +125,12 @@ int flb_lua_pushmpack(lua_State *l, mpack_reader_t *reader)
                 }
                 lua_rawseti(l, -2, i+1);
             }
+            flb_lua_setmetatable(l, &meta);
             break;
         case mpack_type_map:
+            flb_lua_metadata_init(&meta);
+            meta.data_type = mpack_tag_type(&tag);
+
             length = mpack_tag_map_count(&tag);
             lua_createtable(l, length, 0);
             for (i = 0; i < length; i++) {
@@ -112,10 +144,12 @@ int flb_lua_pushmpack(lua_State *l, mpack_reader_t *reader)
                 }
                 lua_settable(l, -3);
             }
+            flb_lua_setmetatable(l, &meta);
             break;
         default:
             return -1;
     }
+
     return 0;
 }
 
@@ -123,6 +157,10 @@ void flb_lua_pushmsgpack(lua_State *l, msgpack_object *o)
 {
     int i;
     int size;
+    struct flb_lua_metadata meta;
+
+    flb_lua_metadata_init(&meta);
+    meta.data_type = o->type;
 
     lua_checkstack(l, 3);
 
@@ -161,6 +199,9 @@ void flb_lua_pushmsgpack(lua_State *l, msgpack_object *o)
             break;
 
         case MSGPACK_OBJECT_ARRAY:
+            flb_lua_metadata_init(&meta);
+            meta.data_type = o->type;
+
             size = o->via.array.size;
             lua_createtable(l, size, 0);
             if (size != 0) {
@@ -170,9 +211,13 @@ void flb_lua_pushmsgpack(lua_State *l, msgpack_object *o)
                     lua_rawseti (l, -2, i+1);
                 }
             }
+            flb_lua_setmetatable(l, &meta);
             break;
 
         case MSGPACK_OBJECT_MAP:
+            flb_lua_metadata_init(&meta);
+            meta.data_type = o->type;
+
             size = o->via.map.size;
             lua_createtable(l, 0, size);
             if (size != 0) {
@@ -183,8 +228,10 @@ void flb_lua_pushmsgpack(lua_State *l, msgpack_object *o)
                     lua_settable(l, -3);
                 }
             }
+            flb_lua_setmetatable(l, &meta);
             break;
     }
+
 }
 
 static int lua_isinteger(lua_State *L, int index)
@@ -274,10 +321,10 @@ int flb_lua_arraylength(lua_State *l)
     return max;
 }
 
-static void lua_toarray(lua_State *l,
-                        msgpack_packer *pck,
-                        int index,
-                        struct flb_lua_l2c_config *l2cc)
+static void lua_toarray_msgpack(lua_State *l,
+                                msgpack_packer *pck,
+                                int index,
+                                struct flb_lua_l2c_config *l2cc)
 {
     int len;
     int i;
@@ -348,7 +395,7 @@ static void try_to_convert_data_type(lua_State *l,
             l2c = mk_list_entry(head, struct flb_lua_l2c_type, _head);
             if (!strncmp(l2c->key, tmp, len) && l2c->type == FLB_LUA_L2C_TYPE_ARRAY) {
                 flb_lua_tomsgpack(l, pck, -1, l2cc);
-                lua_toarray(l, pck, 0, l2cc);
+                lua_toarray_msgpack(l, pck, 0, l2cc);
                 return;
             }
         }
@@ -404,6 +451,87 @@ static void try_to_convert_data_type_mpack(lua_State *l,
     flb_lua_tompack(l, writer, 0, l2cc);
 }
 
+static int flb_lua_getmetatable(lua_State *l, int index, struct flb_lua_metadata *meta)
+{
+    int lua_ret;
+    const char *str;
+    size_t len;
+
+    if (l == NULL || meta == NULL || meta->initialized != FLB_TRUE) {
+        return -1;
+    }
+
+    lua_ret = lua_getmetatable(l, index);
+    if (lua_ret == 0) {
+        /* no metadata */
+        return -1;
+    }
+    else if (lua_type(l, -1) != LUA_TTABLE) {
+        /* invalid metatable? */
+        return -1;
+    }
+
+    lua_pushnil(l);
+    while (lua_next(l, -2) != 0) {
+        if (lua_type(l, -2) != LUA_TSTRING) {
+            /* key is not a string */
+            flb_debug("key is not a string");
+            lua_pop(l, 1);
+            continue;
+        }
+
+        str = lua_tolstring(l, -2, &len);
+
+        if (len == 4 && strncmp(str, "type", 4) == 0) {
+            /* data_type */
+            if (lua_type(l, -1) != LUA_TNUMBER) {
+                /* value is not data type */
+                flb_debug("type is not num. type=%s", lua_typename(l, lua_type(l, -1)));
+                lua_pop(l, 1);
+                continue;
+            }
+            meta->data_type = (int)lua_tointeger(l, -1);
+        }
+
+        lua_pop(l, 1);
+    }
+    lua_pop(l, 1); /* pop metatable */
+
+    return 0;
+}
+
+static inline void lua_tomap_mpack(lua_State *l,
+                                   mpack_writer_t *writer,
+                                   int index,
+                                   struct flb_lua_l2c_config *l2cc)
+{
+    int len;
+
+    len = 0;
+    lua_pushnil(l);
+    while (lua_next(l, -2) != 0) {
+        lua_pop(l, 1);
+        len++;
+    }
+    mpack_write_tag(writer, mpack_tag_map(len));
+
+    lua_pushnil(l);
+
+    if (l2cc->l2c_types_num > 0) {
+        /* type conversion */
+        while (lua_next(l, -2) != 0) {
+            try_to_convert_data_type_mpack(l, writer, index, l2cc);
+            lua_pop(l, 1);
+        }
+    } else {
+        while (lua_next(l, -2) != 0) {
+            flb_lua_tompack(l, writer, -1, l2cc);
+            flb_lua_tompack(l, writer, 0, l2cc);
+            lua_pop(l, 1);
+        }
+    }
+}
+
 void flb_lua_tompack(lua_State *l,
                      mpack_writer_t *writer,
                      int index,
@@ -411,6 +539,8 @@ void flb_lua_tompack(lua_State *l,
 {
     int len;
     int i;
+    int use_metatable = FLB_FALSE;
+    struct flb_lua_metadata meta;
 
     switch (lua_type(l, -1 + index)) {
         case LUA_TSTRING:
@@ -442,6 +572,22 @@ void flb_lua_tompack(lua_State *l,
                 mpack_write_false(writer);
             break;
         case LUA_TTABLE:
+            flb_lua_metadata_init(&meta);
+            if ( flb_lua_getmetatable(l, -1 + index, &meta) == 0 ) {
+                use_metatable = FLB_TRUE;
+            }
+            if (use_metatable) {
+                if (meta.data_type == mpack_type_array) {
+                    /* array */
+                    lua_toarray_mpack(l, writer, 0, l2cc);
+                }
+                else {
+                    /* map */
+                    lua_tomap_mpack(l, writer, index, l2cc);
+                }
+                break;
+            }
+
             len = flb_lua_arraylength(l);
             if (len > 0) {
                 mpack_write_tag(writer, mpack_tag_array(len));
@@ -452,29 +598,7 @@ void flb_lua_tompack(lua_State *l,
                 }
             } else
             {
-                len = 0;
-                lua_pushnil(l);
-                while (lua_next(l, -2) != 0) {
-                    lua_pop(l, 1);
-                    len++;
-                }
-                mpack_write_tag(writer, mpack_tag_map(len));
-
-                lua_pushnil(l);
-
-                if (l2cc->l2c_types_num > 0) {
-                    /* type conversion */
-                    while (lua_next(l, -2) != 0) {
-                        try_to_convert_data_type_mpack(l, writer, index, l2cc);
-                        lua_pop(l, 1);
-                    }
-                } else {
-                    while (lua_next(l, -2) != 0) {
-                        flb_lua_tompack(l, writer, -1, l2cc);
-                        flb_lua_tompack(l, writer, 0, l2cc);
-                        lua_pop(l, 1);
-                    }
-                }
+                lua_tomap_mpack(l, writer, index, l2cc);
             }
             break;
         case LUA_TNIL:
@@ -494,6 +618,40 @@ void flb_lua_tompack(lua_State *l,
     }
 }
 
+static inline void lua_tomap_msgpack(lua_State *l,
+                                     msgpack_packer *pck,
+                                     int index,
+                                     struct flb_lua_l2c_config *l2cc)
+{
+    int len;
+
+    len = 0;
+    lua_pushnil(l);
+    while (lua_next(l, -2) != 0) {
+        lua_pop(l, 1);
+        len++;
+    }
+    msgpack_pack_map(pck, len);
+
+    lua_pushnil(l);
+
+    if (l2cc->l2c_types_num > 0) {
+        /* type conversion */
+        while (lua_next(l, -2) != 0) {
+            try_to_convert_data_type(l, pck, index, l2cc);
+            lua_pop(l, 1);
+        }
+    } else {
+        while (lua_next(l, -2) != 0) {
+            flb_lua_tomsgpack(l, pck, -1, l2cc);
+            flb_lua_tomsgpack(l, pck, 0, l2cc);
+            lua_pop(l, 1);
+        }
+    }
+}
+
+
+
 void flb_lua_tomsgpack(lua_State *l,
                        msgpack_packer *pck,
                        int index,
@@ -501,6 +659,8 @@ void flb_lua_tomsgpack(lua_State *l,
 {
     int len;
     int i;
+    int use_metatable = FLB_FALSE;
+    struct flb_lua_metadata meta;
 
     switch (lua_type(l, -1 + index)) {
         case LUA_TSTRING:
@@ -524,8 +684,8 @@ void flb_lua_tomsgpack(lua_State *l,
                     double num = lua_tonumber(l, -1 + index);
                     msgpack_pack_double(pck, num);
                 }
-            }
-            break;
+            } 
+           break;
         case LUA_TBOOLEAN:
             if (lua_toboolean(l, -1 + index))
                 msgpack_pack_true(pck);
@@ -533,6 +693,23 @@ void flb_lua_tomsgpack(lua_State *l,
                 msgpack_pack_false(pck);
             break;
         case LUA_TTABLE:
+            flb_lua_metadata_init(&meta);
+            if ( flb_lua_getmetatable(l, -1 + index, &meta) == 0 ) {
+                use_metatable = FLB_TRUE;
+            }
+
+            if (use_metatable) {
+                if (meta.data_type == MSGPACK_OBJECT_ARRAY) {
+                    /* array */
+                    lua_toarray_msgpack(l, pck, 0, l2cc);
+                }
+                else {
+                    /* map */
+                    lua_tomap_msgpack(l, pck, index, l2cc);
+                }
+                break;
+            }
+
             len = flb_lua_arraylength(l);
             if (len > 0) {
                 msgpack_pack_array(pck, len);
@@ -541,31 +718,9 @@ void flb_lua_tomsgpack(lua_State *l,
                     flb_lua_tomsgpack(l, pck, 0, l2cc);
                     lua_pop(l, 1);
                 }
-            } else
-            {
-                len = 0;
-                lua_pushnil(l);
-                while (lua_next(l, -2) != 0) {
-                    lua_pop(l, 1);
-                    len++;
-                }
-                msgpack_pack_map(pck, len);
-
-                lua_pushnil(l);
-
-                if (l2cc->l2c_types_num > 0) {
-                    /* type conversion */
-                    while (lua_next(l, -2) != 0) {
-                        try_to_convert_data_type(l, pck, index, l2cc);
-                        lua_pop(l, 1);
-                    }
-                } else {
-                    while (lua_next(l, -2) != 0) {
-                        flb_lua_tomsgpack(l, pck, -1, l2cc);
-                        flb_lua_tomsgpack(l, pck, 0, l2cc);
-                        lua_pop(l, 1);
-                    }
-                }
+            }
+            else {
+                lua_tomap_msgpack(l, pck, index, l2cc);
             }
             break;
         case LUA_TNIL:

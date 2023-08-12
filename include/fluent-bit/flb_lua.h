@@ -47,6 +47,22 @@ struct flb_lua_l2c_config {
     struct mk_list l2c_types;  /* data types (lua -> C) */
 };
 
+struct flb_lua_metadata {
+    int initialized;
+    int data_type;
+};
+
+static inline int flb_lua_metadata_init(struct flb_lua_metadata *meta)
+{
+    if (meta == NULL) {
+        return -1;
+    }
+    meta->initialized = FLB_TRUE;
+    meta->data_type = -1;
+
+    return 0;
+}
+
 int flb_lua_arraylength(lua_State *l);
 void flb_lua_pushtimetable(lua_State *l, struct flb_time *tm);
 int flb_lua_is_valid_func(lua_State *l, flb_sds_t func);
